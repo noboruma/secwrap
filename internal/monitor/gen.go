@@ -1,0 +1,6 @@
+package monitor
+
+// Regenerate vmlinux.h for your kernel with:
+//   bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -tags linux -target amd64 -type event -type file_event netmon netmon.bpf.c -- -I. -O2 -g -Wall

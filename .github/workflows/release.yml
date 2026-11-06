@@ -1,0 +1,40 @@
+# Builds secwrap for Linux amd64 and attaches the binary (and its SHA-256
+# checksum) to a GitHub release when it is published. The eBPF objects are
+# generated for x86 only (internal/monitor/netmon_x86_bpfel.*, committed).
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # upload release assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0" # static binary, runs on any Linux distribution
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          name="secwrap-linux-amd64"
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o "dist/${name}" ./cmd/secwrap
+          (cd dist && sha256sum "${name}" > "${name}.sha256")
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --repo "${{ github.repository }}" --clobber
