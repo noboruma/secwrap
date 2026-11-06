@@ -22,15 +22,20 @@ import (
 // session holds what monitor, run, attach and shell share: the common
 // flags, the live event log, the asker and the summary.
 type session struct {
-	// what to watch
-	net, files, exec bool
+	// what to watch, and what to do with each
+	net, files, exec category
 	sbomDir          string
 	sbomTemp         bool // bare --sbom: in the history folder (or /tmp)
 	// what to do with it
-	deny  bool
-	ask   string // "" | off | session | tty | stdout
-	allow stringList
-	sens  stringList
+	deny      bool   // --deny: the action of categories given bare
+	askOn     bool   // --ask: the same, asking (wins over --deny)
+	askSet    bool   // --ask was given (shell: --deny alone turns asking off)
+	answer    string // inline | detached: where questions are answered
+	askAlias  string // the --answer implied by --ask tty|session|ADDR
+	defAnswer string // --answer when neither it nor --ask says (default inline)
+	shell     bool   // secwrap shell: inline questions only with freezing
+	allow     stringList
+	sens      stringList
 	// how
 	asRoot  bool
 	user    string // --user: run the command as this user
@@ -42,6 +47,7 @@ type session struct {
 	hist    *history
 	sess    *liveSession
 	web     string // --web: serve every session's page at this address (off: "")
+	webSet  bool   // the address was given: don't move to the next free port
 	webHost *webHost
 
 	sboms   *sbomStore
@@ -56,17 +62,20 @@ type session struct {
 // which only make sense for a launched command (not attach).
 func newSession(fs *flag.FlagSet, withAsk bool) *session {
 	s := &session{}
-	fs.BoolVar(&s.net, "net", false, "watch the network: TCP connect/accept, UDP sends")
-	fs.BoolVar(&s.files, "filesystem", false, "watch file opens (BPF LSM)")
-	fs.BoolVar(&s.exec, "exec", false, "watch programs executed (BPF LSM)")
+	modes := "off, log, ask or deny (bare: log, or --deny/--ask)"
+	fs.Var(catFlag{&s.net}, "net", "watch the network: TCP connect/accept, UDP sends; "+modes)
+	fs.Var(catFlag{&s.files}, "filesystem", "watch file opens (BPF LSM); "+modes+";\n"+
+		"deny/ask apply to writes and sensitive reads")
+	fs.Var(catFlag{&s.exec}, "exec", "watch programs executed (BPF LSM); "+modes+";\n"+
+		"deny/ask apply to every program but the launched command")
 	fs.Var(sbomFlag{s}, "sbom", "write a CycloneDX SBOM to DIR for every binary executed (listed on the --ask web page);\n"+
 		"bare --sbom: sboms/ in the session's history folder (/tmp with --history off)")
-	fs.BoolVar(&s.deny, "deny", false, "block what is watched: --net all network access, --filesystem writes and sensitive reads,\n"+
-		"--exec every program but the launched command")
+	fs.BoolVar(&s.deny, "deny", false, "deny every category given bare (--net, --filesystem, --exec without a mode)")
 	if withAsk {
-		fs.Var(askFlag{s}, "ask", "like --deny, but pause each call until answered: session (from secwrap session attach\n"+
-			"or the --web page), tty (or stdout) on the terminal, or off; ADDR is short for session --web ADDR.\n"+
-			"Every session can also be answered with secwrap session attach")
+		fs.Var(askFlag{s}, "ask", "ask about every category given bare: each call pauses until answered (see --answer);\n"+
+			"ADDR is short for --ask --answer detached --web-addr ADDR")
+		fs.Var(answerFlag{&s.answer}, "answer", "where questions are answered: inline (here in the terminal, and from the web\n"+
+			"page or secwrap session attach, first answer wins) or detached (only the web page and attach)")
 		fs.BoolVar(&s.asRoot, "as-root", false, "under sudo, run the command as root instead of SUDO_USER")
 		fs.StringVar(&s.user, "user", "", "run the command as this user (name or uid), with its groups and HOME,\n"+
 			"instead of SUDO_USER (needs root)")
@@ -75,8 +84,12 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 	}
 	fs.Var(&s.allow, "allow", "with --deny/--ask: allow r(ead), w(rite) and/or (e)x(ec) under DIR, e.g. r:~/.oh-my-zsh, rwx:./build (repeatable)")
 	fs.Var(&s.sens, "sensitive", "with --filesystem: extra sensitive PATH (repeatable; a directory covers everything below)")
-	fs.Var(optAddr{&s.web}, "web", "serve the web page of every session at ADDR (bare --web: "+defaultWebAddr+"),\n"+
-		"unless another secwrap serves it already; takes over when that one exits. off: don't")
+	s.web = defaultWebAddr
+	fs.Var(optAddr{&s.web, &s.webSet}, "web-addr", "serve the web page of every session at ADDR (default "+defaultWebAddr+";\n"+
+		"9000, :9000, 0.0.0.0:9100), unless another secwrap serves that address already; takes over when\n"+
+		"that one exits. Each address has one host, and every one shows every session")
+	fs.Var(optAddr{&s.web, &s.webSet}, "web", "same as --web-addr")
+	fs.Var(noWebFlag{&s.web}, "no-web", "don't serve the web page (same as --web off)")
 	fs.BoolVar(&s.summ, "summary", false, "print the summary at the end (it is always in the history folder)")
 	fs.StringVar(&s.histDir, "history", "", "keep every session in a folder under DIR (default ~/.local/state/secwrap), or off")
 	fs.StringVar(&s.log, "log", "", "live events to FILE instead of stderr (JSON lines if it ends in .json/.jsonl), or off")
@@ -85,8 +98,10 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 
 func (s *session) options(cmd []string) monitor.Options {
 	return monitor.Options{
-		Command: cmd, RunAsInvoker: !s.asRoot, RunAs: s.runAs, Net: s.net, Files: s.files, Exec: s.exec,
-		Deny: s.deny, SensitivePaths: s.sens, WaitLeftovers: s.wait,
+		Command: cmd, RunAsInvoker: !s.asRoot, RunAs: s.runAs,
+		Net: s.net.on, Files: s.files.on, Exec: s.exec.on,
+		NetAction: s.net.act, FilesAction: s.files.act, ExecAction: s.exec.act,
+		SensitivePaths: s.sens, WaitLeftovers: s.wait, FreezeOnAsk: s.answer == "inline",
 	}
 }
 
@@ -121,9 +136,9 @@ func (s *session) run(ctx context.Context, o monitor.Options) (*monitor.Report, 
 	if err := o.Validate(); err != nil {
 		return nil, err
 	}
-	// Bare --sbom, or --ask session (the web page lists the binaries run, with
+	// Bare --sbom, or asking with the web page (it lists the binaries run, with
 	// their SBOMs, when the BPF LSM is there): in the history folder, or /tmp.
-	if s.sbomDir == "" && (s.sbomTemp || s.ask == "session" && monitor.BPFLSMEnabled()) {
+	if s.sbomDir == "" && (s.sbomTemp || s.asking() && (s.answer == "detached" || s.web != "") && monitor.BPFLSMEnabled()) {
 		if err := s.tempSBOMDir(); err != nil {
 			return nil, err
 		}
@@ -200,7 +215,11 @@ type optionalValue interface {
 }
 
 // optAddr is --web [ADDR]: bare, the default address; off or false, none.
-type optAddr struct{ p *string }
+// set (if not nil) records that an address was given.
+type optAddr struct {
+	p   *string
+	set *bool
+}
 
 func (f optAddr) IsBoolFlag() bool { return true }
 func (f optAddr) optionalValue()   {}
@@ -223,6 +242,22 @@ func (f optAddr) Set(v string) error {
 			return fmt.Errorf("want an address (9000, :9000, 127.0.0.1:9000) or off, not %q", v)
 		}
 		*f.p = normalizeAddr(v)
+		if f.set != nil {
+			*f.set = true
+		}
+	}
+	return nil
+}
+
+// noWebFlag is --no-web: --web off.
+type noWebFlag struct{ p *string }
+
+func (f noWebFlag) IsBoolFlag() bool { return true }
+func (f noWebFlag) String() string   { return "false" }
+
+func (f noWebFlag) Set(v string) error {
+	if v == "true" {
+		*f.p = ""
 	}
 	return nil
 }
@@ -252,31 +287,157 @@ func (f sbomFlag) Set(v string) error {
 	return nil
 }
 
-// askFlag is --ask; an address means --ask session --web ADDR.
+// category is --net, --filesystem or --exec: watched or not, and what to
+// do with it.
+type category struct {
+	on       bool
+	act      monitor.Action
+	explicit bool // a mode was given: --deny/--ask leave it alone
+}
+
+// catFlag is --net/--filesystem/--exec [off|log|ask|deny]; bare, it is
+// watched with the action of --ask or --deny (log without either).
+type catFlag struct{ c *category }
+
+func (f catFlag) IsBoolFlag() bool { return true }
+func (f catFlag) optionalValue()   {}
+func (f catFlag) accepts(v string) bool {
+	switch v {
+	case "off", "log", "ask", "deny", "true", "false":
+		return true
+	}
+	return false
+}
+
+func (f catFlag) String() string {
+	switch {
+	case f.c == nil || !f.c.on:
+		return "off"
+	case !f.c.explicit:
+		return "true"
+	}
+	return f.c.act.String()
+}
+
+func (f catFlag) Set(v string) error {
+	switch v {
+	case "true":
+		*f.c = category{on: true}
+	case "false", "off":
+		*f.c = category{}
+	case "log":
+		*f.c = category{on: true, act: monitor.ActionLog, explicit: true}
+	case "deny":
+		*f.c = category{on: true, act: monitor.ActionDeny, explicit: true}
+	case "ask":
+		*f.c = category{on: true, act: monitor.ActionAsk, explicit: true}
+	default:
+		return fmt.Errorf("want off, log, ask or deny, not %q", v)
+	}
+	return nil
+}
+
+// askFlag is --ask [off|inline|detached|ADDR]: bare, every category given
+// bare is asked about, answered as --answer says. inline and detached
+// (and their old spellings tty/stdout and session) also set --answer; an
+// address is short for --ask --answer detached --web-addr ADDR.
 type askFlag struct{ s *session }
 
-func (f askFlag) String() string {
-	if f.s == nil {
-		return ""
+func (f askFlag) IsBoolFlag() bool { return true }
+func (f askFlag) optionalValue()   {}
+func (f askFlag) accepts(v string) bool {
+	switch v {
+	case "true", "false", "on", "off", "tty", "stdout", "session", "inline", "detached":
+		return true
 	}
-	return f.s.ask
+	return looksLikeAddr(v)
+}
+
+func (f askFlag) String() string {
+	if f.s == nil || !f.s.askOn {
+		return "off"
+	}
+	return "on"
 }
 
 func (f askFlag) Set(v string) error {
+	s := f.s
+	s.askOn, s.askSet = true, true
 	switch {
-	case v == "session" || v == "tty" || v == "stdout" || v == "off" || v == "":
-		f.s.ask = v
+	case v == "true" || v == "on":
+	case v == "false" || v == "off":
+		s.askOn = false
+	case v == "inline" || v == "tty" || v == "stdout":
+		s.askAlias = "inline"
+	case v == "detached" || v == "session":
+		s.askAlias = "detached"
 	case looksLikeAddr(v):
-		f.s.ask, f.s.web = "session", normalizeAddr(v)
+		s.askAlias, s.web, s.webSet = "detached", normalizeAddr(v), true
 	default:
-		return fmt.Errorf("want session, tty, off or an address (9000, :9000, 127.0.0.1:9000), not %q", v)
+		return fmt.Errorf("want off, inline, detached or an address (9000, :9000, 127.0.0.1:9000), not %q", v)
 	}
 	return nil
+}
+
+// answerFlag is --answer inline|detached.
+type answerFlag struct{ p *string }
+
+func (f answerFlag) String() string {
+	if f.p == nil {
+		return ""
+	}
+	return *f.p
+}
+
+func (f answerFlag) Set(v string) error {
+	switch v {
+	case "inline", "tty", "stdout":
+		*f.p = "inline"
+	case "detached", "session":
+		*f.p = "detached"
+	default:
+		return fmt.Errorf("want inline or detached, not %q", v)
+	}
+	return nil
+}
+
+// resolve gives the categories given bare the action of --ask (first) or
+// --deny, and picks where questions are answered: --answer, else what
+// --ask implied, else s.defAnswer (inline). --deny without --ask turns a
+// default --ask (shell) off.
+func (s *session) resolve(explicitAnswer bool) {
+	if s.deny && !s.askSet {
+		s.askOn = false
+	}
+	act := monitor.ActionLog
+	switch {
+	case s.askOn:
+		act = monitor.ActionAsk
+	case s.deny:
+		act = monitor.ActionDeny
+	}
+	for _, c := range []*category{&s.net, &s.files, &s.exec} {
+		if c.on && !c.explicit {
+			c.act = act
+		}
+	}
+	switch {
+	case explicitAnswer:
+	case s.askAlias != "":
+		s.answer = s.askAlias
+	case s.defAnswer != "":
+		s.answer = s.defAnswer
+	default:
+		s.answer = "inline"
+	}
 }
 
 // parse parses args into fs (see parseFlags), then checks --user.
 func (s *session) parse(fs *flag.FlagSet, args []string) {
 	parseFlags(fs, args)
+	explicit := false
+	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "answer" })
+	s.resolve(explicit)
 	if err := s.resolveUser(); err != nil {
 		fmt.Fprintln(os.Stderr, "secwrap:", err)
 		os.Exit(2)
@@ -306,7 +467,10 @@ func parseFlags(fs *flag.FlagSet, args []string) {
 		}
 		next := args[i+1]
 		if _, ok := f.Value.(optionalValue); ok {
-			if !strings.HasPrefix(next, "-") {
+			// A flag that knows its values takes only those: --net ls is
+			// a bare --net, then the command.
+			acc, known := f.Value.(interface{ accepts(string) bool })
+			if !strings.HasPrefix(next, "-") && (!known || acc.accepts(next)) {
 				out[len(out)-1] = a + "=" + next
 				i++
 			}
@@ -346,18 +510,21 @@ func (s *session) info(o monitor.Options) sessionInfo {
 	if len(o.Command) > 0 {
 		i.Target = strings.Join(o.Command, " ")
 	}
+	deny := false
 	for _, w := range []struct {
 		on   bool
 		name string
-	}{{s.net, "net"}, {s.files, "filesystem"}, {s.exec, "exec"}} {
+		act  monitor.Action
+	}{{o.Net, "net", o.NetAction}, {o.Files, "filesystem", o.FilesAction}, {o.Exec, "exec", o.ExecAction}} {
 		if w.on {
-			i.Watch = append(i.Watch, w.name)
+			i.Watch = append(i.Watch, w.name+":"+w.act.String())
+			deny = deny || w.act == monitor.ActionDeny
 		}
 	}
 	switch {
-	case s.asking():
-		i.Ask = s.ask
-	case s.deny:
+	case o.Asks():
+		i.Ask = s.answer
+	case deny:
 		i.Ask = "deny"
 	}
 	if s.runAs != nil {
@@ -366,25 +533,34 @@ func (s *session) info(o monitor.Options) sessionInfo {
 	return i
 }
 
-// announce says where the session is, and how to answer it.
+// announce lists what is watched and how, then where the session is.
 func (s *session) announce() {
+	mode := func(c category) string {
+		if !c.on {
+			return "OFF"
+		}
+		return strings.ToUpper(c.act.String())
+	}
+	sbom := "OFF"
+	if s.sbomDir != "" {
+		sbom = "ON"
+	}
+	fmt.Fprintf(os.Stderr, "NETWORK:    %s\nFILESYSTEM: %s\nEXEC:       %s\nSBOM:       %s\n",
+		mode(s.net), mode(s.files), mode(s.exec), sbom)
+
+	// Our address's page (whoever hosts it), else any page: they all show
+	// every session.
 	id := s.sess.info.ID
-	page := ""
-	if base, _ := currentWeb(); base != "" {
-		page = base + "s/" + id + "/"
+	base := ""
+	if w, ok := currentWeb(s.web); s.web != "" && ok {
+		base = w.Base
+	} else if ws := allWebs(); len(ws) > 0 {
+		base = ws[0].Base
 	}
-	switch {
-	case s.asking() && page != "":
-		fmt.Fprintf(os.Stderr, "secwrap: session %s: answer at %s or with sudo secwrap session attach %s\n", id, page, id)
-	case s.asking():
-		fmt.Fprintf(os.Stderr, "secwrap: session %s: answer with sudo secwrap session attach %s (or sudo secwrap session --web)\n", id, id)
-	case page != "":
-		fmt.Fprintf(os.Stderr, "secwrap: session %s: %s\n", id, page)
-	default:
-		fmt.Fprintf(os.Stderr, "secwrap: session %s\n", id)
-	}
-	if s.hist != nil {
-		fmt.Fprintf(os.Stderr, "secwrap: recording it in %s\n", s.hist.dir)
+	if base != "" {
+		fmt.Fprintf(os.Stderr, "Session %s: %ss/%s/\n", id, base, id)
+	} else {
+		fmt.Fprintf(os.Stderr, "Session %s: sudo secwrap session attach %s\n", id, id)
 	}
 }
 
@@ -420,14 +596,16 @@ func (s *session) start(cmd []string) error {
 	}
 	if asking { // every question goes to the session files; tty races them
 		var tty func(context.Context, monitor.AskRequest) monitor.AskAnswer
-		if s.ask == "tty" || s.ask == "stdout" {
-			tty = newTTYAsker().ask
+		if s.answer == "inline" {
+			t := newTTYAsker()
+			t.needFreeze = s.shell
+			tty = t.ask
 		}
 		sa := newSessionAsker(s.sess, tty)
 		s.asker, s.stopAsk = sa.ask, sa.close
 	}
 	if s.web != "" {
-		s.webHost = startWebHost(s.web)
+		s.webHost = startWebHost(s.web, !s.webSet)
 	}
 
 	switch s.log {
@@ -447,7 +625,15 @@ func (s *session) start(cmd []string) error {
 	return nil
 }
 
-func (s *session) asking() bool { return s.ask != "" && s.ask != "off" }
+// asking: some watched category is asked about.
+func (s *session) asking() bool {
+	for _, c := range []category{s.net, s.files, s.exec} {
+		if c.on && c.act == monitor.ActionAsk {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *session) closeSBOMs() {
 	if s.sboms != nil {

@@ -1,10 +1,9 @@
 package main
 
-// secwrap session [--web [ADDR]] | list | attach [ID] | delete ID...
+// secwrap session [list | attach [ID] | delete ID...]
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -19,21 +18,9 @@ import (
 )
 
 func cmdSession(args []string) error {
-	usage := errors.New("usage: secwrap session [--web [ADDR]] | list | attach [ID] | delete ID...")
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		fs := flag.NewFlagSet("session", flag.ExitOnError)
-		web := ""
-		fs.Var(optAddr{&web}, "web", "also serve the web page of every session at ADDR (bare: "+defaultWebAddr+"),\n"+
-			"or take it over when the secwrap serving it exits")
-		fs.Usage = func() {
-			fmt.Fprintln(os.Stderr, strings.TrimPrefix(usage.Error(), "usage: "))
-			fs.PrintDefaults()
-		}
-		parseFlags(fs, args)
-		if fs.NArg() > 0 {
-			return usage
-		}
-		return sessionUI(web)
+	usage := errors.New("usage: secwrap session [list | attach [ID] | delete ID...]")
+	if len(args) == 0 {
+		return sessionUI()
 	}
 	switch args[0] {
 	case "list", "ls":
@@ -109,6 +96,9 @@ func attachSession(v sessionView, lines <-chan string, w io.Writer) error {
 		return errors.New("answering needs root: sudo secwrap session attach")
 	}
 	fmt.Fprintf(w, "attached to %s: %s (pid %d, %s, ask: %s)\n", v.ID, v.Target, v.PID, v.userLabel(), v.askLabel())
+	if v.History != "" {
+		fmt.Fprintf(w, "recorded in %s\n", v.History)
+	}
 	fmt.Fprintln(w, "answer each request here; q (or Ctrl-D) to detach")
 
 	q := askQueue{v: v, done: map[int]bool{}}

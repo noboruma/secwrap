@@ -49,6 +49,12 @@ type AskRequest struct {
 	Sensitive bool     // open: under a sensitive path
 	Args      []string // exec: the command line (argv), possibly truncated
 
+	// Freeze, set by the supervisor with Options.FreezeOnAsk, freezes the
+	// launched command's tree (the paused task included) until thaw is
+	// called: for asking on the terminal it shares with the target. Nil
+	// when the kernel can't (see Options.FreezeOnAsk).
+	Freeze func() (thaw func()) `json:"-"`
+
 	// Forget, set by the supervisor, undoes the answer to this request once
 	// given (a deny, an allow, or the folder rule it created), so the next
 	// such call asks again. Calls and files already let through stay so.
@@ -114,6 +120,8 @@ type askConfig struct {
 	fileAllow map[string]uint8 // preset file rules (the launched command)
 
 	net, opens, execs bool // which categories are asked about
+
+	freeze func() (thaw func()) // AskRequest.Freeze, or nil
 }
 
 // fileRuleSink stores file decisions where the LSM program enforces them
@@ -350,6 +358,7 @@ func (s *supervisor) decide(ctx context.Context, key string, r AskRequest,
 		s.asking[q] = struct{}{}
 		s.mu.Unlock()
 
+		r.Freeze = s.freeze
 		d := s.ask(askCtx, r)
 
 		s.mu.Lock()

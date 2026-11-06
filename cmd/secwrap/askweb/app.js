@@ -120,7 +120,8 @@ async function pollSession() {
     $("state").className = `state ${s.alive ? "alive" : "dead"}`;
     $("state-pill").textContent = s.alive ? "alive" : "dead";
     $("state-what").textContent = s.target;
-    $("state-detail").textContent = `${s.user} · ask: ${s.ask} · ${s.detail}`;
+    $("state-detail").textContent = `${s.user} · ask: ${s.ask} · ${s.detail}`
+      + (s.history ? ` · recorded in ${s.history}` : "");
   } catch {
     $("state").hidden = true;
   }

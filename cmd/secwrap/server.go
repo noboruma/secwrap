@@ -1,23 +1,25 @@
 package main
 
 // The web page for every session, served from the session files by
-// whichever secwrap holds the web lock: a shell (--web, its default), a
-// monitor with --web, or secwrap session --web. Every one of them keeps
-// trying to take the lock, so as long as one runs the page is up: when the
-// host exits (or its listener dies) the next takes over within a second,
-// on the same URL (the token is kept). And the terminal UI of secwrap
+// whichever secwrap running a session holds the lock of its address
+// (--web-addr, default 127.0.0.1:9000; none with --no-web). One host per
+// address, every address showing every session. Each secwrap keeps trying
+// to take its address's lock, so as long as one runs the page is up: when
+// the host exits (or its listener dies) the next takes over within a
+// second, on the same URL (the token is shared by every address). And the terminal UI of secwrap
 // session, to see sessions alive or dead, attach, choose which are on the
 // web page, and delete dead ones.
 //
-//	/var/lib/secwrap/web.lock    flock-ed by the host
-//	/var/lib/secwrap/web.json    the host's address and pid (root only)
-//	/var/lib/secwrap/web.token   the URL token (root only)
+//	/var/lib/secwrap/web-ADDR.lock  flock-ed by the host of ADDR
+//	/var/lib/secwrap/web-ADDR.json  its address and pid (root only)
+//	/var/lib/secwrap/web.token      the URL token (root only)
 
 import (
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -48,8 +50,16 @@ const (
 func stateDir() string { return filepath.Dir(sessionsDir()) }
 
 type webInfo struct {
-	Addr string `json:"addr"`
+	Addr string `json:"addr"`           // listened on
+	Want string `json:"want,omitempty"` // asked for (names the files); Addr if empty
 	PID  int    `json:"pid"`
+}
+
+func (wi webInfo) wanted() string {
+	if wi.Want != "" {
+		return wi.Want
+	}
+	return wi.Addr
 }
 
 // webToken returns the persistent URL token, creating it the first time.
@@ -95,31 +105,70 @@ func normalizeAddr(addr string) string {
 	return addr
 }
 
-// currentWeb is the base URL of the running web host ("" if none, or if
-// we may not read its token) and its pid.
-func currentWeb() (base string, pid int) {
-	if !lockHeld(filepath.Join(stateDir(), "web.lock")) {
-		return "", 0
+// webFile is the lock (".lock") or info (".json") file of addr's host.
+func webFile(addr, ext string) string {
+	key := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '.' {
+			return r
+		}
+		return '_'
+	}, normalizeAddr(addr))
+	return filepath.Join(stateDir(), "web-"+key+ext)
+}
+
+// servedWeb is one address's running host: its base URL ("" if we may not
+// read the token) and pid.
+type servedWeb struct {
+	Addr, Base string
+	PID        int
+}
+
+// currentWeb is the host of addr, if one runs.
+func currentWeb(addr string) (servedWeb, bool) {
+	if !lockHeld(webFile(addr, ".lock")) {
+		return servedWeb{}, false
 	}
-	b, err := os.ReadFile(filepath.Join(stateDir(), "web.json"))
+	b, err := os.ReadFile(webFile(addr, ".json"))
 	if err != nil {
-		return "", 0
+		return servedWeb{}, false
 	}
 	var wi webInfo
 	if json.Unmarshal(b, &wi) != nil {
-		return "", 0
+		return servedWeb{}, false
 	}
-	tok, err := os.ReadFile(filepath.Join(stateDir(), "web.token"))
-	if err != nil {
-		return "", wi.PID
+	w := servedWeb{Addr: wi.Addr, PID: wi.PID}
+	if tok, err := os.ReadFile(filepath.Join(stateDir(), "web.token")); err == nil {
+		w.Base = fmt.Sprintf("http://%s/%s/", shownAddr(wi.Addr), strings.TrimSpace(string(tok)))
 	}
-	return fmt.Sprintf("http://%s/%s/", shownAddr(wi.Addr), strings.TrimSpace(string(tok))), wi.PID
+	return w, true
+}
+
+// allWebs is every address served now, the default one first.
+func allWebs() []servedWeb {
+	var out []servedWeb
+	if w, ok := currentWeb(defaultWebAddr); ok {
+		out = append(out, w)
+	}
+	infos, _ := filepath.Glob(filepath.Join(stateDir(), "web-*.json"))
+	for _, f := range infos {
+		b, err := os.ReadFile(f)
+		var wi webInfo
+		if err != nil || json.Unmarshal(b, &wi) != nil || webFile(wi.wanted(), ".json") != f ||
+			f == webFile(defaultWebAddr, ".json") {
+			continue
+		}
+		if w, ok := currentWeb(wi.wanted()); ok {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // webHost serves the page while it holds the web lock, and keeps trying
 // to take it over while another secwrap does.
 type webHost struct {
-	addr string
+	addr     string
+	nextPort bool // the default address: take the next free port if busy
 
 	mu      sync.Mutex
 	hosting bool
@@ -130,8 +179,10 @@ type webHost struct {
 	done    chan struct{}
 }
 
-func startWebHost(addr string) *webHost {
-	h := &webHost{addr: normalizeAddr(addr), stop: make(chan struct{}), done: make(chan struct{})}
+// startWebHost serves addr; with nextPort (no address given), the next
+// free port when addr's is in use.
+func startWebHost(addr string, nextPort bool) *webHost {
+	h := &webHost{addr: normalizeAddr(addr), nextPort: nextPort, stop: make(chan struct{}), done: make(chan struct{})}
 	h.try() // now, so the URL can be announced
 	go h.loop()
 	return h
@@ -158,7 +209,7 @@ func (h *webHost) try() {
 	if h.hosting || os.MkdirAll(stateDir(), 0o755) != nil {
 		return
 	}
-	lock, err := os.OpenFile(filepath.Join(stateDir(), "web.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	lock, err := os.OpenFile(webFile(h.addr, ".lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return
 	}
@@ -171,7 +222,11 @@ func (h *webHost) try() {
 		lock.Close()
 		return
 	}
-	ln, err := net.Listen("tcp", h.addr)
+	tries := 1
+	if h.nextPort {
+		tries = webPortTries
+	}
+	ln, actual, err := listenFrom(h.addr, tries)
 	if err != nil {
 		if !h.warned {
 			fmt.Fprintf(os.Stderr, "secwrap: web page: %v (secwrap session attach still answers)\n", err)
@@ -180,8 +235,11 @@ func (h *webHost) try() {
 		lock.Close()
 		return
 	}
-	wi, _ := json.Marshal(webInfo{Addr: h.addr, PID: os.Getpid()})
-	_ = os.WriteFile(filepath.Join(stateDir(), "web.json"), wi, 0o600)
+	if actual != h.addr {
+		fmt.Fprintf(os.Stderr, "secwrap: web page: %s is taken, serving on %s\n", h.addr, actual)
+	}
+	wi, _ := json.Marshal(webInfo{Addr: actual, Want: h.addr, PID: os.Getpid()})
+	_ = os.WriteFile(webFile(h.addr, ".json"), wi, 0o600)
 	srv := &http.Server{Handler: webHandler(tok), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		// The listener failed while we live: hand the page over.
@@ -200,6 +258,37 @@ func (h *webHost) try() {
 	}
 }
 
+// webPortTries is how many ports the default address tries.
+const webPortTries = 100
+
+// listenFrom listens on addr or, while its port is in use (by another
+// program, or a secwrap serving an overlapping address such as 0.0.0.0
+// next to 127.0.0.1), on the next free port up, 9001, 9002, ...: tries
+// ports in all.
+func listenFrom(addr string, tries int) (net.Listener, string, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	port, perr := strconv.Atoi(portStr)
+	if err != nil || perr != nil || port == 0 {
+		ln, err := net.Listen("tcp", addr)
+		return ln, addr, err
+	}
+	var first error
+	for p := port; p < port+tries && p <= 65535; p++ {
+		a := net.JoinHostPort(host, strconv.Itoa(p))
+		ln, err := net.Listen("tcp", a)
+		if err == nil {
+			return ln, a, nil
+		}
+		if first == nil {
+			first = err
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			break
+		}
+	}
+	return nil, "", first
+}
+
 func (h *webHost) release() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -211,12 +300,6 @@ func (h *webHost) release() {
 	srv.Close()
 	h.lock.Close() // the next secwrap takes over
 	h.hosting = false
-}
-
-func (h *webHost) isHosting() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.hosting
 }
 
 func (h *webHost) close() {
@@ -343,13 +426,14 @@ func serveIndex(rw http.ResponseWriter, r *http.Request) {
 func serveSessionInfo(rw http.ResponseWriter, r *http.Request, v sessionView) {
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(struct {
-		ID     string `json:"id"`
-		Alive  bool   `json:"alive"`
-		Detail string `json:"detail"`
-		Target string `json:"target"`
-		User   string `json:"user"`
-		Ask    string `json:"ask"`
-	}{v.ID, v.Running, v.stateDetail(), v.Target, v.userLabel(), v.askLabel()})
+		ID      string `json:"id"`
+		Alive   bool   `json:"alive"`
+		Detail  string `json:"detail"`
+		Target  string `json:"target"`
+		User    string `json:"user"`
+		Ask     string `json:"ask"`
+		History string `json:"history,omitempty"`
+	}{v.ID, v.Running, v.stateDetail(), v.Target, v.userLabel(), v.askLabel(), v.History})
 }
 
 func serveRequests(rw http.ResponseWriter, r *http.Request, v sessionView) {
@@ -499,57 +583,19 @@ func serveSBOM(rw http.ResponseWriter, r *http.Request, v sessionView) {
 }
 
 // ---------------------------------------------------------------------------
-// secwrap session [--web [ADDR]]: the terminal UI
+// secwrap session: the terminal UI. It serves no page: the secwraps that
+// run sessions do.
 
-func sessionUI(web string) error {
-	var host *webHost
-	if web != "" {
-		host = startWebHost(web)
-		defer host.close()
-		if os.Geteuid() != 0 {
-			fmt.Fprintln(os.Stderr, "secwrap: warning: not root: the page can show sessions but not answer them")
-		}
-	}
+func sessionUI() error {
 	if !isTerminal(os.Stdin) {
-		return sessionPlain(host)
+		return sessionList(os.Stdout)
 	}
-	return runTUI(host)
+	return runTUI()
 }
 
 func isTerminal(f *os.File) bool {
 	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
 	return err == nil
-}
-
-// sessionPlain: no terminal (a service): host the page, log the sessions.
-func sessionPlain(host *webHost) error {
-	if host == nil {
-		return sessionList(os.Stdout)
-	}
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	seen := map[string]bool{}
-	announced := ""
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
-	for {
-		if base, pid := currentWeb(); base != announced && base != "" {
-			fmt.Fprintf(os.Stderr, "secwrap: web page %s (pid %d)\n", base, pid)
-			announced = base
-		}
-		list, _ := listSessions()
-		for _, v := range list {
-			if key := v.ID + "/" + v.state(); !seen[key] {
-				seen[key] = true
-				fmt.Fprintf(os.Stderr, "secwrap: %-5s %s  %s\n", v.state(), v.ID, trunc(v.Target, 50))
-			}
-		}
-		select {
-		case <-sig:
-			return nil
-		case <-t.C:
-		}
-	}
 }
 
 type keyReader struct{ ch chan []byte } // nil: EOF (Ctrl-D in cooked mode)
@@ -636,21 +682,17 @@ func (t *term) setCooked() {
 
 // tuiState is what one frame shows, reloaded on each tick (not per key).
 type tuiState struct {
-	list      []sessionView // newest first
-	base      string        // web page URL, if any
-	pid       int           // its host
-	hostsHere bool
+	list []sessionView // newest first
+	webs []servedWeb   // the addresses served
 }
 
-func loadTUI(host *webHost) tuiState {
+func loadTUI() tuiState {
 	list, _ := listSessions()
 	slices.Reverse(list)
-	st := tuiState{list: list, hostsHere: host != nil && host.isHosting()}
-	st.base, st.pid = currentWeb()
-	return st
+	return tuiState{list: list, webs: allWebs()}
 }
 
-func runTUI(host *webHost) error {
+func runTUI() error {
 	t, err := newTerm()
 	if err != nil {
 		return err
@@ -666,10 +708,10 @@ func runTUI(host *webHost) error {
 	defer tick.Stop()
 	sel, msg := 0, ""
 	confirm := "" // session ID awaiting a delete confirmation
-	st := loadTUI(host)
+	st := loadTUI()
 	for {
 		sel = max(0, min(sel, len(st.list)-1))
-		render(host, st, sel, msg, confirm)
+		render(st, sel, msg, confirm)
 
 		var key []byte
 		select {
@@ -677,7 +719,7 @@ func runTUI(host *webHost) error {
 			fmt.Print("\x1b[H\x1b[2J")
 			return nil
 		case <-tick.C:
-			st = loadTUI(host)
+			st = loadTUI()
 			continue
 		case key = <-keys.ch:
 		}
@@ -698,7 +740,7 @@ func runTUI(host *webHost) error {
 				}
 			}
 			confirm = ""
-			st = loadTUI(host)
+			st = loadTUI()
 			continue
 		}
 		switch k := string(key); {
@@ -714,7 +756,7 @@ func runTUI(host *webHost) error {
 			if err := setHidden(*cur, !cur.Hidden); err != nil {
 				msg = err.Error()
 			}
-			st = loadTUI(host)
+			st = loadTUI()
 		case k == "W":
 			hide := slices.ContainsFunc(st.list, func(v sessionView) bool { return !v.Hidden })
 			for _, v := range st.list {
@@ -722,7 +764,7 @@ func runTUI(host *webHost) error {
 					msg = err.Error()
 				}
 			}
-			st = loadTUI(host)
+			st = loadTUI()
 		case k == "d":
 			if cur.Running {
 				msg = cur.ID + " is alive: only dead sessions can be deleted"
@@ -742,7 +784,7 @@ func runTUI(host *webHost) error {
 			}
 			close(stop)
 			t.setRaw()
-			st = loadTUI(host)
+			st = loadTUI()
 		}
 	}
 }
@@ -759,7 +801,7 @@ const (
 	ansiGreen, ansiYellow, ansiGrey       = "\x1b[32;1m", "\x1b[33;1m", "\x1b[90m"
 )
 
-func render(host *webHost, st tuiState, sel int, msg, confirm string) {
+func render(st tuiState, sel int, msg, confirm string) {
 	var b strings.Builder
 	b.WriteString("\x1b[H\x1b[2J")
 	alive := 0
@@ -769,17 +811,15 @@ func render(host *webHost, st tuiState, sel int, msg, confirm string) {
 		}
 	}
 	fmt.Fprintf(&b, "%ssecwrap sessions%s  %d alive, %d dead\n", ansiBold, ansiReset, alive, len(st.list)-alive)
-	switch {
-	case st.base != "" && st.hostsHere:
-		fmt.Fprintf(&b, "web: %s  (served here)\n", st.base)
-	case st.base != "":
-		fmt.Fprintf(&b, "web: %s  (served by pid %d)\n", st.base, st.pid)
-	case st.pid != 0:
-		fmt.Fprintf(&b, "web: served by pid %d (run as root to see its URL)\n", st.pid)
-	case host != nil:
-		fmt.Fprintf(&b, "web: not served yet (address busy?), retrying\n")
-	default:
-		fmt.Fprintf(&b, "web: off (secwrap session --web, or a running shell, serves it)\n")
+	for _, w := range st.webs {
+		if w.Base != "" {
+			fmt.Fprintf(&b, "web: %s  (served by pid %d)\n", w.Base, w.PID)
+		} else {
+			fmt.Fprintf(&b, "web: %s served by pid %d (run as root to see its URL)\n", w.Addr, w.PID)
+		}
+	}
+	if len(st.webs) == 0 {
+		fmt.Fprintf(&b, "web: off (every secwrap running a session serves it, unless --no-web)\n")
 	}
 	fmt.Fprintf(&b, "%s↑/↓ select · Enter attach · w on/off the web page (W: all) · d delete (dead) · q quit%s\n\n", ansiDim, ansiReset)
 	if len(st.list) == 0 {
@@ -809,8 +849,10 @@ func render(host *webHost, st tuiState, sel int, msg, confirm string) {
 	if sel < len(st.list) {
 		v := st.list[sel]
 		b.WriteString("\n")
-		if st.base != "" && !v.Hidden {
-			fmt.Fprintf(&b, "  page: %ss/%s/\n", st.base, v.ID)
+		for _, w := range st.webs {
+			if w.Base != "" && !v.Hidden {
+				fmt.Fprintf(&b, "  page: %ss/%s/\n", w.Base, v.ID)
+			}
 		}
 		if v.History != "" {
 			fmt.Fprintf(&b, "  history: %s\n", v.History)

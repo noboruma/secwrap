@@ -104,14 +104,19 @@ type Options struct {
 	// not block.
 	OnBinary func(FileEvent)
 
-	// What to do, for each category watched. Deny refuses in the kernel:
-	// Net all network access, Files writes and sensitive reads, Exec every
-	// program but the launched command. Ask pauses those calls until it
+	// What to do with each category watched (Net, Files, Exec above):
+	// ActionLog records it, ActionDeny refuses it in the kernel (Net all
+	// network access, Files writes and sensitive reads, Exec every program
+	// but the launched command), ActionAsk pauses those calls until Ask
 	// returns a decision (only with Command); what is not allowed yet is
-	// refused, as with Deny. Ask may be called concurrently, once per
+	// refused, as with ActionDeny. Ask may be called concurrently, once per
 	// distinct question; ctx is cancelled when the paused task goes away.
-	Deny bool
-	Ask  func(ctx context.Context, r AskRequest) AskAnswer
+	NetAction, FilesAction, ExecAction Action
+	Ask                                func(ctx context.Context, r AskRequest) AskAnswer
+	// FreezeOnAsk runs the command in a cgroup that AskRequest.Freeze can
+	// freeze, for questions asked on the terminal (cgroup v2, Linux 5.19+;
+	// without them Freeze stays nil).
+	FreezeOnAsk bool
 	// Allow are folder rules: reads, writes or execs that need no answer.
 	Allow []FolderRule
 	// SensitivePaths are added to the default sensitive paths (home, /root,
@@ -140,7 +145,38 @@ type Options struct {
 	Stdout, Stderr io.Writer
 }
 
-func (o *Options) enforcing() bool { return o.Deny || o.Ask != nil }
+// Action is what to do with a watched category.
+type Action uint8
+
+const (
+	ActionLog  Action = iota // record only
+	ActionDeny               // refuse in the kernel
+	ActionAsk                // pause until Options.Ask answers
+)
+
+func (a Action) String() string {
+	switch a {
+	case ActionDeny:
+		return "deny"
+	case ActionAsk:
+		return "ask"
+	}
+	return "log"
+}
+
+// enforcesNet, enforcesFiles and enforcesExec: the category is watched and
+// denied or asked about.
+func (o *Options) enforcesNet() bool   { return o.Net && o.NetAction != ActionLog }
+func (o *Options) enforcesFiles() bool { return o.Files && o.FilesAction != ActionLog }
+func (o *Options) enforcesExec() bool  { return o.Exec && o.ExecAction != ActionLog }
+
+// enforcing: some watched category is denied or asked about.
+func (o *Options) enforcing() bool { return o.enforcesNet() || o.enforcesFiles() || o.enforcesExec() }
+
+// Asks reports whether some watched category is asked about.
+func (o *Options) Asks() bool {
+	return o.Net && o.NetAction == ActionAsk || o.Files && o.FilesAction == ActionAsk || o.Exec && o.ExecAction == ActionAsk
+}
 
 // Run attaches the probes and collects events until ctx is cancelled or the
 // target is gone.
@@ -148,7 +184,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-	blockNet := opts.Net && opts.enforcing()
+	blockNet := opts.enforcesNet()
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("eBPF needs root (or CAP_BPF+CAP_PERFMON+CAP_SYS_RESOURCE); try: sudo %s: %w", os.Args[0], err)
 	}
@@ -177,8 +213,8 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 			return nil, err
 		}
 		c := lsmConfig{
-			opens: opts.Files || opts.OnBinary != nil, logAll: opts.Files, enforceFiles: opts.Files && opts.enforcing(),
-			exec: opts.Exec, enforceExec: opts.Exec && opts.enforcing(),
+			opens: opts.Files || opts.OnBinary != nil, logAll: opts.Files, enforceFiles: opts.enforcesFiles(),
+			exec: opts.Exec, enforceExec: opts.enforcesExec(),
 		}
 		if files, err = setupLSM(spec, objs.Tracked, scope, c, &cleanup); err != nil {
 			return nil, err
@@ -231,7 +267,9 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	case len(opts.Command) > 0:
 		report.Target = fmt.Sprint(opts.Command)
 		cfg := askConfig{ask: opts.Ask, emit: emit, emitFile: emitFile, deny: deny, scope: scope, dirAllow: dirAllow,
-			net: opts.Net, opens: opts.Files, execs: opts.Exec}
+			net:   opts.Net && opts.NetAction == ActionAsk,
+			opens: opts.Files && opts.FilesAction == ActionAsk,
+			execs: opts.Exec && opts.ExecAction == ActionAsk}
 		if files != nil {
 			cfg.files = files // not a nil *fileObjects in a non-nil interface
 		}
@@ -281,14 +319,14 @@ func (o *Options) Validate() error {
 	switch {
 	case !o.Net && !o.Files && !o.Exec && o.OnBinary == nil:
 		return errors.New("choose what to monitor: --net, --filesystem, --exec and/or --sbom")
-	case o.enforcing() && !o.Net && !o.Files && !o.Exec:
-		return errors.New("--deny/--ask apply to --net, --filesystem or --exec: choose at least one")
 	case len(o.Command) == 0 && len(o.PIDs) == 0 && !o.All:
 		return errors.New("nothing to monitor: give a command, PIDs or --all")
-	case o.Ask != nil && len(o.Command) == 0:
-		return errors.New("--ask only works with a launched command (not --all or attach)")
-	case len(o.Allow) > 0 && (!o.enforcing() || (!o.Files && !o.Exec)):
-		return errors.New("--allow needs --filesystem or --exec, with --deny or --ask")
+	case o.Asks() && len(o.Command) == 0:
+		return errors.New("asking only works with a launched command (not --all or attach)")
+	case o.Asks() && o.Ask == nil:
+		return errors.New("a category is asked about but Options.Ask is nil")
+	case len(o.Allow) > 0 && !o.enforcesFiles() && !o.enforcesExec():
+		return errors.New("--allow needs --filesystem or --exec set to deny or ask")
 	case o.enforcing() && o.All:
 		return errors.New("--deny/--ask cannot be combined with --all (it would apply to the whole host)")
 	}
@@ -518,15 +556,26 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 		}
 		attr.Credential, cmd.Env = cred, userEnv(u)
 	}
-	if deny != nil {
+	freezePath := ""
+	switch {
+	case deny != nil:
 		attr.UseCgroupFD, attr.CgroupFD = true, deny.FD()
+		freezePath = deny.path
+	case opts.FreezeOnAsk && opts.Asks():
+		pc, err := newPlainCgroup()
+		if err != nil {
+			return 0, err
+		}
+		defer pc.Close()
+		attr.UseCgroupFD, attr.CgroupFD = true, pc.FD()
+		freezePath = pc.path
 	}
 	cmd.SysProcAttr = attr
 
 	// --exec with --deny/--ask: the launched command may run, and so may
 	// secwrap's own ask helper, until it has exec'd the target.
 	helperRule := ""
-	if opts.Exec && opts.enforcing() && cfg.files != nil {
+	if opts.enforcesExec() && cfg.files != nil {
 		target, err := exec.LookPath(opts.Command[0])
 		if err == nil {
 			target, err = filepath.EvalSymlinks(target)
@@ -541,7 +590,7 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 			return 0, fmt.Errorf("--exec: allow %s: %w", target, err)
 		}
 		cfg.fileAllow = map[string]uint8{target: ruleExec}
-		if self, err := os.Executable(); opts.Ask != nil && err == nil {
+		if self, err := os.Executable(); opts.Asks() && err == nil {
 			if self, err = filepath.EvalSymlinks(self); err == nil && self != target {
 				if cfg.files.allow(self, ruleExec) == nil {
 					helperRule = self
@@ -550,8 +599,8 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 		}
 	}
 
-	var finishAsk func() (int, error)
-	if opts.Ask != nil {
+	var finishAsk func() (int, bool, error)
+	if opts.Asks() {
 		var err error
 		if finishAsk, err = askCommand(cmd, opts.Command, cfg.net, cfg.opens, cfg.execs); err != nil {
 			return 0, fmt.Errorf("ask mode: %w", err)
@@ -571,7 +620,7 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 	_ = track(cmd.Process.Pid)
 
 	if finishAsk != nil {
-		lfd, err := finishAsk()
+		lfd, killable, err := finishAsk()
 		if helperRule != "" {
 			cfg.files.allow(helperRule, 0) // the helper is running: no more secwrap execs
 		}
@@ -579,6 +628,9 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
 			return 0, fmt.Errorf("ask mode: %w", err)
+		}
+		if opts.FreezeOnAsk && killable && freezePath != "" {
+			cfg.freeze = freezer(freezePath)
 		}
 		stop := superviseAsk(lfd, cfg)
 		defer stop()

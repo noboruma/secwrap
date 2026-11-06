@@ -56,21 +56,21 @@ func usage() {
   secwrap run     [flags] -- CMD ...            SBOM + monitor; endpoints become CycloneDX services
   secwrap attach  [flags] (PID... | --name N)   monitor running processes and their children
   secwrap shell   [flags] [-- SHELL ...]        shell where everything you run is monitored
-  secwrap session [--web [ADDR]]               sessions alive and dead in a terminal UI; --web also serves the page
+  secwrap session                              sessions alive and dead in a terminal UI: attach, delete
   secwrap session list | attach [ID] | delete ID  list; answer one's questions here (root); delete dead ones
 
-What to watch (at least one; shell: --net --filesystem):
-  --net              network: TCP connect/accept, UDP sends
-  --filesystem       file opens (BPF LSM)
-  --exec             programs executed (BPF LSM)
-  --sbom [DIR]       a CycloneDX SBOM in DIR (default: the history folder) for every binary executed
-What to do with it (default: record):
-  --deny             block: all network, writes and sensitive reads, every exec but CMD
-  --ask session|tty  pause each call until answered: from secwrap session (attach, web page) or the terminal
-  --web [ADDR]       serve every session's web page (default 127.0.0.1:9000; shell: on) unless one already does
-                     (9000, :9000, 127.0.0.1:9000); not for attach
-  --allow rwx:DIR    with --deny/--ask: allow reads/writes/execs under DIR (repeatable)
-  --log FILE|off     live events to FILE (JSON lines if *.json/*.jsonl) instead of stderr
+What to watch, and what to do with each: off, log, ask or deny (shell: --net --filesystem --ask):
+  --net [MODE]          network: TCP connect/accept, UDP sends
+  --filesystem [MODE]   file opens (BPF LSM); deny/ask: writes and sensitive reads
+  --exec [MODE]         programs executed (BPF LSM); deny/ask: every exec but CMD
+  --sbom [DIR]          a CycloneDX SBOM in DIR (default: the history folder) for every binary executed
+  --deny, --ask         the mode of categories given bare (default: log)
+  --answer inline|detached  ask here in the terminal too (default), or only from secwrap session (attach, web page)
+  --web-addr ADDR       serve every session's web page at ADDR (default 127.0.0.1:9000; 9000, :9000, 0.0.0.0:9100)
+                        unless a secwrap already serves that address; one host per address, all show every session
+  --no-web              don't serve it
+  --allow rwx:DIR       with deny/ask: allow reads/writes/execs under DIR (repeatable)
+  --log FILE|off        live events to FILE (JSON lines if *.json/*.jsonl) instead of stderr
 Run "secwrap CMD -h" for all flags.
 `)
 }

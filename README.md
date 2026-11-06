@@ -23,8 +23,9 @@ or build it with `make` (regenerates the eBPF objects; needs clang and libbpf-de
 
 ## Features
 
-Pick **what to watch** with `--net`, `--filesystem`, `--exec` and/or `--sbom` (`shell` turns on `--net --filesystem`),
-and **what to do** with it: record (default), `--deny` or `--ask`, which apply to every category watched. Children are
+Pick **what to watch**, and **what to do** with each, with `--net`, `--filesystem` and `--exec`: `log`, `ask`, `deny`
+or `off` (e.g. `--net ask --filesystem log`), plus `--sbom`. Given bare (`--net`), a category logs, or does what
+`--ask`/`--deny` say (`--net --filesystem --ask`); `shell` turns on `--net --filesystem --ask`. Children are
 followed before they run any code. Under `sudo`, the command runs as you, with your groups and `HOME`; `--user NAME`
 runs it as someone else, `--as-root` keeps root.
 
@@ -37,9 +38,9 @@ closes everything. `--wait` keeps monitoring them until they exit instead. The s
 | Network | `--net` | TCP connect/accept and UDP sends (DNS, QUIC) of the whole process tree, per process |
 | Files | `--filesystem` | Every open, with its full path; writes and [sensitive reads](#files) shown live |
 | Programs | `--exec` | Every program executed, see [Programs](#programs) |
-| Block | `--deny` | Refused in the kernel, every attempt recorded: all network (`--net`), writes and sensitive reads (`--filesystem`), every program but the launched one (`--exec`) |
-| Ask | `--ask session`, `--ask tty` | The call waits inside the kernel for your Yes/No: from `secwrap session` (attach or the [web page](#web-page)) or the terminal. See [Asking](#asking) |
-| Web page | `--web [ADDR]` | One page for every session, alive or dead, on `127.0.0.1:9000`; whichever secwrap runs with `--web` serves it (`shell` does by default) |
+| Block | `--net deny`, `--deny` | Refused in the kernel, every attempt recorded: all network (`--net`), writes and sensitive reads (`--filesystem`), every program but the launched one (`--exec`) |
+| Ask | `--net ask`, `--ask` | The call waits inside the kernel for your Yes/No, right in the terminal (`--answer inline`, the default) and from `secwrap session` (attach or the [web page](#web-page)); `--answer detached` leaves the terminal alone. See [Asking](#asking) |
+| Web page | on by default, `--web-addr ADDR`, `--no-web` | One page for every session, alive or dead, on `127.0.0.1:9000` or any other address; one secwrap serves each address, the others take over when it exits |
 | Sessions | `secwrap session`, `list`, `attach`, `delete` | Every run is a session, alive or dead, that others can see and answer without a connection to it, see [Sessions](#sessions) |
 | Folder rules | `--allow rwx:DIR`, `f`, *Allow folder* | Reads, writes and/or execs under a folder need no answer; each kind stays separate |
 | SBOM per binary | `--sbom [DIR]` | A CycloneDX SBOM for every binary the session runs, listed on the web page with a VirusTotal link, see [SBOMs](#sboms) |
@@ -56,11 +57,12 @@ closes everything. `--wait` keeps monitoring them until they exit instead. The s
 sudo ./secwrap monitor --net --filesystem -o report.json -- ./mybinary          # record
 sudo ./secwrap monitor --net --deny -- curl -s https://example.com              # offline
 sudo ./secwrap monitor --exec --deny -- ./mybinary                              # can't start anything else
-sudo ./secwrap monitor --net --filesystem --exec --ask tty -- ./installer.sh    # ask on the terminal
-sudo ./secwrap monitor --net --filesystem --ask session -- ./installer.sh       # ask; answer from elsewhere:
+sudo ./secwrap monitor --net ask --filesystem log -- ./installer.sh            # ask about the network, log files
+sudo ./secwrap monitor --net --filesystem --exec --ask -- ./installer.sh        # ask about everything, here
+sudo ./secwrap monitor --net --ask --answer detached -- ./installer.sh          # ask; answer from elsewhere:
 sudo ./secwrap session attach                                                   #   in another terminal,
-sudo ./secwrap session --web                                                    #   or the TUI + web page
-sudo ./secwrap shell --sbom ~/sboms                    # ask on the web page it serves, SBOM every binary
+sudo ./secwrap session                                                          #   or the TUI (or the web page)
+sudo ./secwrap shell --sbom ~/sboms                    # ask inline (or on its web page), SBOM every binary
 sudo ./secwrap attach --net --filesystem --name nginx --duration 5m --log nginx.jsonl
 ```
 
@@ -80,7 +82,12 @@ the session (on the web page, *Forget* takes one back), and concurrent calls to 
 `f` (or *Allow folder* on the page) allows every read, write or exec (the kind asked about) under the file's parent or
 any ancestor but `/`; requests already waiting below it are answered at once. `--allow` does it up front:
 `--allow r:~/.oh-my-zsh`, `--allow rw:./build`, `--allow x:/usr/bin` (`~/` is expanded even after `r:`).
-`--ask tty` reads `/dev/tty`, not the target's stdin; with no terminal, everything is denied. Only launched commands can
+`--answer inline` asks on `/dev/tty`, not the target's stdin, and borrows it for each question: the command's tree is
+frozen (cgroup v2 freezer, invisible to it and to a shell's job control), secwrap takes the foreground, sets the
+terminal to line mode, drops typed-ahead input, asks, then puts everything back and thaws (a full-screen program or
+the shell prompt gets `SIGWINCH` to redraw). Freezing needs Linux 5.19+ and cgroup v2; without them `monitor`/`run`
+ask without freezing, and `shell` leaves its questions to the web page and attach. With no terminal, everything is
+denied. `--answer detached` never touches the terminal. Only launched commands can
 be asked about: seccomp can't be added to a running process. The target runs with `no_new_privs`, so setuid binaries
 inside it (sudo, ping) don't gain privileges.
 
@@ -102,7 +109,8 @@ pass for an allowed folder.
 
 ### Web page
 
-`--web [ADDR]` (`9000`, `:9000`, `127.0.0.1:9000`; bare: `127.0.0.1:9000`) serves one page listing every session, alive
+Every secwrap serves (`--web-addr ADDR` to pick the address: `9000`, `:9000`, `0.0.0.0:9100`; default
+`127.0.0.1:9000`; `--no-web` not to) one page listing every session, alive
 or dead, and for each the questions with **Yes** / **No**, *Allow folder* for files
 and programs, the history, and the [binaries](#sboms) with their SBOMs. Each session's page says whether it is
 **alive** or **dead** (and how it ended); the tab title counts what is waiting.
@@ -148,7 +156,8 @@ off.
   /usr/bin/curl                                      x1    28 components -> curl-52e9ceef96bd.cdx.json
 ```
 
-With `--ask session` (the `shell` default) they are always collected, as with a bare `--sbom`, and listed on the web
+When asking with the web page on (the default) they are always collected, as with a bare `--sbom`, and listed on the
+web
 page: *SBOM* shows the components in place (`#sbom-ID` in the URL links to one), *JSON* downloads it, and
 *VirusTotal* opens `virustotal.com/gui/file/<sha256>`: your browser sends the hash, secwrap uploads nothing.
 
@@ -188,21 +197,25 @@ $ sudo secwrap session attach          # the only session asking; or an ID, part
 [ask #3] Allow curl (pid 4242) tcp connect to 93.184.215.14:443? [y/N]  (Y = any port on this IP, D = never this IP)
 ```
 
-`attach` asks the same questions as `--ask tty`, oldest first, and moves on when one is answered elsewhere; `q` or
-Ctrl-D detaches, and the session keeps waiting. `--ask session` waits only for these answers; with `--ask tty` the
-questions are published too, and the first answer wins.
+`attach` asks the same questions as `--answer inline`, oldest first, and moves on when one is answered elsewhere; `q`
+or Ctrl-D detaches, and the session keeps waiting. Questions are always published; with `--answer inline` they are
+also asked in the session's own terminal, and the first answer wins. `--answer detached` waits only for these answers.
 
 `secwrap session` alone opens a terminal UI of every session, **alive** or **dead** (with how it ended): ↑/↓ to select,
 Enter to attach to an alive one, `w` to put a session on the web page or take it off (`W`: all), `d` to delete a dead
-one's record (its [history](#history) stays), `q` to quit. `secwrap session --web [ADDR]` also serves the web page.
+one's record (its [history](#history) stays), `q` to quit. It serves no page: the secwraps running sessions do.
 
 ### Who serves the web page
 
-One page, one URL, for every session. Each secwrap started with `--web` (`shell` by default; `monitor`, `run`,
-`session` when asked) tries to serve it: the first one takes a lock and listens, the others keep trying every second.
-When it exits, or its listener dies, the next one takes over, on the same URL (the token is kept, root-only, in
-`/var/lib/secwrap/web.token`). So the page is up as long as any secwrap with `--web` runs, and a shell never starts a
-second page next to an existing one. `--ask ADDR` is short for `--ask session --web ADDR`.
+Every page shows every session; addresses only decide where it is reachable. Each secwrap running a session (`shell`,
+`monitor`, `run`, `attach`; unless `--no-web`) tries to serve its address: the first one takes that address's lock and
+listens, the others with the same address keep trying every second. When it exits, or its listener dies, the next one
+takes over, on the same URL (the token is shared by every address and kept, root-only, in
+`/var/lib/secwrap/web.token`). So each address is up as long as a secwrap using it runs, and a shell never starts a
+second page next to an existing one. A session prints its own address's URL (or, with `--no-web`, any page that is
+up); `secwrap session` lists every address served. If the default port is in use (by another program), the host
+takes the next free one, 9001 and so on, and says so; an address given with `--web-addr` is used as is, and its host
+waits until it is free. `--ask ADDR` is short for `--ask --answer detached --web-addr ADDR`.
 
 Answering needs root: the folder holding the answers is root's alone, because the monitored command runs as your user
 and must not answer its own questions. Listing and watching only need to be the session's user.
@@ -210,11 +223,13 @@ and must not answer its own questions. Listing and watching only need to be the 
 ## Shell
 
 `secwrap shell` starts your login shell as you (or `--user NAME`), with
-`--net --filesystem --ask session --web --log off` (add `--exec` to be asked before every command). bash and zsh load
-your startup files and get a `(secwrap)` prompt prefix (kept by themes); `SECWRAP_SHELL=1` is set. Answer on the web
-page it serves (unless a secwrap serves it already; `--web off` for none) or with `sudo secwrap session` in another
-terminal (`--ask tty` would fight the shell for the keyboard). Ctrl-C goes to the shell, and the session ends when it
-exits. `--ask off` only records, `--deny` blocks without asking, `-- SHELL ARGS` runs another shell. Shells read a lot
+`--net --filesystem --ask --answer inline --log off` (add `--exec` to be asked before every command). bash and
+zsh load your startup files and get a `(secwrap)` prompt prefix (kept by themes); `SECWRAP_SHELL=1` is set. Questions
+come up in the shell itself, the shell and its jobs frozen until you answer (see [Asking](#asking)), or answer on the
+web page it serves (unless a secwrap serves it already; `--no-web` for none) or with `sudo secwrap session` in another
+terminal; `--answer detached` keeps them off the terminal. Ctrl-C goes to the shell, and the session ends when it
+exits. `--ask off` only records, `--deny` blocks without asking, `--net log` only records the network, `-- SHELL ARGS`
+runs another shell. Shells read a lot
 under your home at startup: `--allow r:~/.oh-my-zsh` saves the questions.
 
 ### Login shell
@@ -251,8 +266,9 @@ sudo usermod -aG monitored alice && sudo chsh -s /usr/local/bin/secwrap-login al
 > every flag; only the shell's arguments (`-l`, `-c CMD` for SSH) come from the user.
 
 Name the real shell after `--`: secwrap refuses to start a login shell that is a secwrap wrapper, which would loop.
-`--ask off` makes an unattended audit log (in a root-only directory), `--deny` keeps the user offline, `--ask session`
-needs someone answering (one web page serves every session). In ask mode, `sudo` doesn't work inside the session.
+`--ask off` makes an unattended audit log (in a root-only directory), `--deny` keeps the user offline, `--ask` lets
+the user answer in their own terminal, `--answer detached` needs someone else answering (one web page serves every
+session). In ask mode, `sudo` doesn't work inside the session.
 
 ### In Docker
 
@@ -265,7 +281,7 @@ created, add `--cgroupns=host`.
 FROM debian:13
 COPY secwrap /usr/local/bin/
 RUN useradd -m app
-ENTRYPOINT ["secwrap", "shell", "--net", "--filesystem", "--web", "0.0.0.0:9000", "--", "/bin/bash", "-l"]
+ENTRYPOINT ["secwrap", "shell", "--net", "--filesystem", "--web-addr", "0.0.0.0:9000", "--", "/bin/bash", "-l"]
 ```
 
 ```sh

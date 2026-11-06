@@ -3,14 +3,14 @@ package main
 // secwrap shell: an interactive shell whose whole process tree is
 // monitored. Everything typed in it runs as a child of the shell, so it is
 // followed by the fork hook, stays in the deny cgroup and inherits the
-// seccomp filter. Questions go to the web page: the shell owns the terminal
-// (it reads the keyboard and takes the foreground for job control), so
-// terminal prompts would fight it for input.
+// seccomp filter. Questions are asked inline: the shell owns the terminal
+// (it reads the keyboard and takes the foreground for job control), so for
+// each question secwrap freezes the tree and borrows the terminal (see
+// ttyAsker); they can also be answered from the web page or attach.
 
 import (
 	"bufio"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -26,49 +26,26 @@ func cmdShell(args []string) error {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
 	s := newSession(fs, true)
 	out := fs.String("o", "", "write the JSON report to FILE when the shell exits ('-' for stdout)")
-	// Shell defaults: network and files, ask on the web page, no live output
-	// (it would scribble over the shell; use --log FILE and tail -f it).
-	for name, v := range map[string]string{"net": "true", "filesystem": "true", "ask": "session", "log": "off", "web": defaultWebAddr} {
+	// Shell defaults: network and files, asked about inline (and on the web
+	// page), no live output (it would scribble over the shell; use --log
+	// FILE and tail -f it). --deny alone turns asking off.
+	for name, v := range map[string]string{"net": "true", "filesystem": "true", "log": "off"} {
 		fs.Lookup(name).DefValue = v
 		fs.Set(name, v)
 	}
+	s.askOn, s.defAnswer, s.shell = true, "inline", true
+	fs.Lookup("ask").DefValue, fs.Lookup("answer").DefValue = "on", "inline"
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: secwrap shell [flags] [-- SHELL [ARGS...]]")
 		fs.PrintDefaults()
 	}
 	s.parse(fs, args)
-	explicit := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
-	if s.deny && !explicit["ask"] {
-		s.ask = "off" // --deny: block without asking
-	}
-	if s.ask == "tty" || s.ask == "stdout" {
-		return errors.New("shell: --ask tty would fight the shell for the keyboard; use --ask session (the default) or --ask off")
-	}
 
 	argv, cleanup, err := shellCommand(fs.Args(), s.shellUID())
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-
-	var what []string
-	for _, c := range []struct {
-		on   bool
-		name string
-	}{{s.net, "network"}, {s.files, "file writes and sensitive reads"}, {s.exec, "programs"}} {
-		if c.on {
-			what = append(what, c.name)
-		}
-	}
-	mode := "recording only"
-	switch {
-	case s.deny:
-		mode = "blocked: " + strings.Join(what, ", ")
-	case s.ask != "off":
-		mode = strings.Join(what, ", ") + " wait for your answer"
-	}
-	fmt.Fprintf(os.Stderr, "secwrap shell: everything run in this shell is monitored; %s.\n", mode)
 
 	// Ctrl-C belongs to the shell and its jobs. secwrap only stops on
 	// SIGTERM/SIGHUP, or on Ctrl-C once the shell itself has exited (while

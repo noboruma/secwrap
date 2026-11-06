@@ -94,13 +94,17 @@ func RunAskHelper(args []string) {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		fail(fmt.Errorf("no_new_privs: %w", err))
 	}
-	lfd, err := installNotifyFilter(nrs)
+	lfd, killable, err := installNotifyFilter(nrs)
 	if err != nil {
 		fail(fmt.Errorf("seccomp: %w", err))
 	}
 	// write/read are not trapped by the filter, so this cannot deadlock.
 	var buf [4]byte
-	binary.NativeEndian.PutUint32(buf[:], uint32(lfd))
+	v := uint32(lfd)
+	if killable {
+		v |= killableBit
+	}
+	binary.NativeEndian.PutUint32(buf[:], v)
 	if _, err := ctl.Write(buf[:]); err != nil {
 		fail(err)
 	}
@@ -115,10 +119,21 @@ func RunAskHelper(args []string) {
 	fail(fmt.Errorf("exec %s: %w", path, err))
 }
 
+// seccompWaitKillableRecv is SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (5.19):
+// once the supervisor has read a notification, the paused task waits for
+// the answer killably, so a signal (or the cgroup freezer, which inline
+// questions use) doesn't withdraw the question.
+const seccompWaitKillableRecv = 1 << 5
+
+// killableBit, in the listener fd the helper reports, says the filter has
+// seccompWaitKillableRecv.
+const killableBit = 1 << 31
+
 // installNotifyFilter makes the syscalls in nrs return SECCOMP_RET_USER_NOTIF
 // and allows everything else. Other architectures (x32 numbers, i386 via
 // int 0x80) are allowed: the BPF cgroup/LSM hooks still refuse them.
-func installNotifyFilter(nrs []uint32) (int, error) {
+// killable reports whether the kernel took seccompWaitKillableRecv.
+func installNotifyFilter(nrs []uint32) (fd int, killable bool, err error) {
 	const (
 		ldAbs = unix.BPF_LD | unix.BPF_W | unix.BPF_ABS
 		jeq   = unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K
@@ -139,13 +154,20 @@ func installNotifyFilter(nrs []uint32) (int, error) {
 		unix.SockFilter{Code: ret, K: unix.SECCOMP_RET_USER_NOTIF},
 	)
 	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
-	fd, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
-		unix.SECCOMP_FILTER_FLAG_NEW_LISTENER, uintptr(unsafe.Pointer(&prog)))
+	install := func(flags uintptr) (uintptr, unix.Errno) {
+		r, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER, flags, uintptr(unsafe.Pointer(&prog)))
+		return r, errno
+	}
+	r, errno := install(unix.SECCOMP_FILTER_FLAG_NEW_LISTENER | seccompWaitKillableRecv)
+	killable = errno == 0
+	if errno == unix.EINVAL { // before 5.19
+		r, errno = install(unix.SECCOMP_FILTER_FLAG_NEW_LISTENER)
+	}
 	runtime.KeepAlive(filter)
 	if errno != 0 {
-		return -1, errno
+		return -1, false, errno
 	}
-	return int(fd), nil
+	return int(r), killable, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +175,8 @@ func installNotifyFilter(nrs []uint32) (int, error) {
 
 // askCommand prepares cmd to run the target through the helper. Call
 // finish after cmd.Start to collect the listener and release the helper.
-func askCommand(cmd *exec.Cmd, argv []string, net, files, execs bool) (finish func() (int, error), err error) {
+// finish's killable: see seccompWaitKillableRecv.
+func askCommand(cmd *exec.Cmd, argv []string, net, files, execs bool) (finish func() (lfd int, killable bool, err error), err error) {
 	self, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -180,28 +203,29 @@ func askCommand(cmd *exec.Cmd, argv []string, net, files, execs bool) (finish fu
 	cmd.Err = nil // Command's LookPath of the original target is irrelevant now
 	cmd.ExtraFiles = []*os.File{child}
 
-	return func() (int, error) {
+	return func() (int, bool, error) {
 		defer parent.Close()
 		child.Close()
 		parent.SetReadDeadline(time.Now().Add(10 * time.Second))
 		var buf [4]byte
 		if _, err := parent.Read(buf[:]); err != nil {
-			return -1, fmt.Errorf("ask helper did not report a seccomp listener: %w", err)
+			return -1, false, fmt.Errorf("ask helper did not report a seccomp listener: %w", err)
 		}
 		pidfd, err := unix.PidfdOpen(cmd.Process.Pid, 0)
 		if err != nil {
-			return -1, fmt.Errorf("pidfd_open: %w", err)
+			return -1, false, fmt.Errorf("pidfd_open: %w", err)
 		}
 		defer unix.Close(pidfd)
-		lfd, err := unix.PidfdGetfd(pidfd, int(binary.NativeEndian.Uint32(buf[:])), 0)
+		v := binary.NativeEndian.Uint32(buf[:])
+		lfd, err := unix.PidfdGetfd(pidfd, int(v&^killableBit), 0)
 		if err != nil {
-			return -1, fmt.Errorf("pidfd_getfd (seccomp listener): %w", err)
+			return -1, false, fmt.Errorf("pidfd_getfd (seccomp listener): %w", err)
 		}
 		if _, err := parent.Write([]byte{1}); err != nil {
 			unix.Close(lfd)
-			return -1, err
+			return -1, false, err
 		}
-		return lfd, nil
+		return lfd, v&killableBit != 0, nil
 	}, nil
 }
 

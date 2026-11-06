@@ -10,12 +10,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/noboruma/secwrap/internal/monitor"
 )
@@ -217,16 +221,31 @@ func pickFolder(w io.Writer, it webItem, read func() (string, readResult)) (stri
 }
 
 // ---------------------------------------------------------------------------
-// --ask tty
+// --answer inline
 
 // ttyAsker asks on the controlling terminal (not stdin, which belongs to the
 // target), one question at a time. Anything but yes, or no terminal, denies.
+//
+// The terminal is shared with the target (and in secwrap shell, owned by
+// the shell), so for each question it is borrowed: the target's tree is
+// frozen (AskRequest.Freeze) so nothing else reads the keyboard, secwrap's
+// process group takes the foreground, the line discipline is set to cooked
+// mode (the target may have left it raw), and all of it is put back after.
+// The keyboard is read only while a question is up.
 type ttyAsker struct {
-	sem   chan struct{} // one question at a time
-	once  sync.Once
-	tty   *os.File
-	lines chan string
-	err   error
+	sem  chan struct{} // one question at a time
+	once sync.Once
+	tty  *os.File
+	fd   int // tty's (not tty.Fd(), which would make reads blocking: no deadlines)
+	br   *bufio.Reader
+	err  error
+
+	// needFreeze: without AskRequest.Freeze, don't touch the terminal and
+	// leave the question to the web page and attach. secwrap shell sets it:
+	// taking the terminal from a shell reading its prompt, unfrozen, could
+	// hand it the answer, or make its next read fail and the shell exit.
+	needFreeze bool
+	warnOnce   sync.Once
 }
 
 func newTTYAsker() *ttyAsker { return &ttyAsker{sem: make(chan struct{}, 1)} }
@@ -236,18 +255,59 @@ func (t *ttyAsker) open() {
 	if t.err != nil {
 		return
 	}
-	t.lines = make(chan string)
-	go func() { // one reader for the whole session, so prompts can be cancelled
-		r := bufio.NewReader(t.tty)
-		for {
-			line, err := r.ReadString('\n')
-			if err != nil {
-				close(t.lines)
-				return
-			}
-			t.lines <- strings.TrimSpace(line)
+	t.br = bufio.NewReader(t.tty)
+	rc, err := t.tty.SyscallConn()
+	if err == nil {
+		err = rc.Control(func(fd uintptr) { t.fd = int(fd) })
+	}
+	if err != nil {
+		t.tty.Close()
+		t.err = err
+	}
+}
+
+// borrow takes the terminal for one question; give it back with the
+// returned function.
+func (t *ttyAsker) borrow(r monitor.AskRequest) (giveBack func()) {
+	thaw := func() {}
+	if r.Freeze != nil {
+		thaw = r.Freeze()
+	}
+	fd := t.fd
+	oldFg, fgErr := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
+	me := unix.Getpgrp()
+	tookFg := false
+	if fgErr == nil && oldFg != me {
+		// From the background, TIOCSPGRP raises SIGTTOU unless it is ignored.
+		signal.Ignore(syscall.SIGTTOU)
+		tookFg = unix.IoctlSetPointerInt(fd, unix.TIOCSPGRP, me) == nil
+		signal.Reset(syscall.SIGTTOU)
+	}
+	// Drop typed-ahead input: it was not typed for this question, and the
+	// tree may have pushed it in (TIOCSTI) before asking; frozen, it can't now.
+	unix.IoctlSetInt(fd, unix.TCFLSH, unix.TCIFLUSH)
+	t.br.Reset(t.tty)
+	saved, termErr := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if termErr == nil {
+		cooked := *saved
+		cooked.Iflag |= unix.ICRNL
+		cooked.Oflag |= unix.OPOST | unix.ONLCR
+		cooked.Lflag |= unix.ICANON | unix.ECHO | unix.ECHOE | unix.ISIG
+		unix.IoctlSetTermios(fd, unix.TCSETSW, &cooked)
+	}
+	return func() {
+		if termErr == nil {
+			unix.IoctlSetTermios(fd, unix.TCSETSW, saved)
 		}
-	}()
+		// Hand the foreground back unless someone else took it meanwhile,
+		// and have its owner redraw (a shell prompt, a full-screen program).
+		if cur, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP); tookFg && err == nil && cur == me {
+			if unix.IoctlSetPointerInt(fd, unix.TIOCSPGRP, oldFg) == nil {
+				defer unix.Kill(-oldFg, unix.SIGWINCH)
+			}
+		}
+		thaw()
+	}
 }
 
 // ask is the inner asker of sessionAsker: ctx ends when the question is
@@ -263,9 +323,46 @@ func (t *ttyAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.AskAns
 
 	t.once.Do(t.open)
 	if t.err != nil {
-		fmt.Fprintf(os.Stderr, "secwrap: --ask: no terminal (%v), denying\n", t.err)
+		fmt.Fprintf(os.Stderr, "secwrap: --answer inline: no terminal (%v), denying\n", t.err)
 		return deny
 	}
+	if t.needFreeze && r.Freeze == nil {
+		t.warnOnce.Do(func() {
+			fmt.Fprintln(os.Stderr, "secwrap: inline questions need Linux 5.19+ and cgroup v2 here; answer on the web page or with secwrap session attach")
+		})
+		<-ctx.Done()
+		return deny
+	}
+	defer t.borrow(r)()
+
+	// Read lines only while this question is up; a deadline interrupts the
+	// read when it ends (answered elsewhere, or answered here).
+	lines := make(chan string)
+	stop := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer close(lines)
+		for {
+			line, err := t.br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			select {
+			case lines <- strings.TrimSpace(line):
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		if t.tty.SetReadDeadline(time.Now()) == nil {
+			<-readerDone
+			t.tty.SetReadDeadline(time.Time{})
+		}
+	}()
+
 	read := func() (string, readResult) {
 		select {
 		case <-ctx.Done():
@@ -278,7 +375,7 @@ func (t *ttyAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.AskAns
 				fmt.Fprintln(t.tty, "\n      (process gone, question dropped)")
 			}
 			return "", gotVoid
-		case line, ok := <-t.lines:
+		case line, ok := <-lines:
 			if !ok {
 				return "", gotVoid
 			}
