@@ -33,9 +33,23 @@ chmod +x secwrap
 
 `make dist` builds them all into `dist/`.
 
+### Running as root
+
+Run `secwrap` as yourself. It needs root to load eBPF, so it asks `sudo` for your password and re-runs itself as
+root, but **the command it monitors still runs as you**, with your groups and your environment. Only `secwrap` itself
+runs as root.
+
+Started as root, `sudo secwrap …` included, `secwrap` takes it that you want the command to run as root.
+
+| How `secwrap` is started | Who the command runs as |
+| --- | --- |
+| As you | You |
+| As root (`sudo secwrap`, a root login, a container entrypoint) | Root |
+| Either way, with `--user NAME` | `NAME` |
+
 ### Requirements
 
-- Root, Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), on any architecture listed above.
+- Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), on any architecture listed above.
 - Asking with the process paused (the shell and the inline prompt): Linux 5.19+ with cgroup v2. On older kernels,
   `monitor` still asks without pausing, while `shell` only takes answers from the web page or `secwrap session`.
 - The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
@@ -75,23 +89,23 @@ Set a mode for each kind of access: `log`, `ask`, `deny` or `off`. A flag given 
 
 ```sh
 # Network
-sudo secwrap monitor --net log -- ./mybinary                     # log every connection
-sudo secwrap monitor --net ask -- ./install.sh                   # ask before each new connection
-sudo secwrap monitor --net deny -- curl https://example.com      # block all network access
+secwrap monitor --net log -- ./mybinary                     # log every connection
+secwrap monitor --net ask -- ./install.sh                   # ask before each new connection
+secwrap monitor --net deny -- curl https://example.com      # block all network access
 
 # Files
-sudo secwrap monitor --filesystem log -- ./mybinary              # log every file opened
-sudo secwrap monitor --filesystem ask -- ./install.sh            # ask before each write or sensitive read
-sudo secwrap monitor --filesystem deny -- ./mybinary             # block writes and sensitive reads
+secwrap monitor --filesystem log -- ./mybinary              # log every file opened
+secwrap monitor --filesystem ask -- ./install.sh            # ask before each write or sensitive read
+secwrap monitor --filesystem deny -- ./mybinary             # block writes and sensitive reads
 
 # Execution
-sudo secwrap monitor --exec log -- ./mybinary                    # log every program started
-sudo secwrap monitor --exec ask -- ./install.sh                  # ask before each new program
-sudo secwrap monitor --exec deny -- ./mybinary                   # block starting any other program
+secwrap monitor --exec log -- ./mybinary                    # log every program started
+secwrap monitor --exec ask -- ./install.sh                  # ask before each new program
+secwrap monitor --exec deny -- ./mybinary                   # block starting any other program
 
 # Combined
-sudo secwrap monitor --net ask --filesystem log -- ./install.sh  # ask about the network, log files
-sudo secwrap shell                                               # an interactive shell that asks about network and files
+secwrap monitor --net ask --filesystem log -- ./install.sh  # ask about the network, log files
+secwrap shell                                               # an interactive shell that asks about network and files
 ```
 
 #### Which file reads are asked about
@@ -115,7 +129,7 @@ about or blocked: writes are covered everywhere already, sensitive or not. The l
 defaults included, so you can add up to 9. A folder covers everything inside it:
 
 ```sh
-sudo secwrap monitor --filesystem ask --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./install.sh
+secwrap monitor --filesystem ask --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./install.sh
 ```
 
 ### Answering
@@ -137,7 +151,7 @@ Every question can be answered in three places at once; the first answer wins:
 | --- | --- | --- |
 | Inline | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way (Linux 5.19+ with cgroup v2). | `--no-inline` |
 | Web page | `http://127.0.0.1:9000` by default; `--web-addr ADDR` changes the address. | `--no-web` |
-| `sudo secwrap session` | In another terminal: `secwrap session attach`, or the terminal UI. | Always on |
+| `secwrap session` | In another terminal: `secwrap session attach`, or the terminal UI. | Always on |
 
 Without a terminal, inline questions step aside and wait for the web page or `secwrap session`.
 
@@ -159,7 +173,7 @@ exec sudo -n /usr/local/sbin/secwrap-session "$@"
 
 ```sh
 #!/bin/sh
-exec /usr/local/bin/secwrap shell --net --filesystem --exec -- /bin/bash "$@"
+exec /usr/local/bin/secwrap shell --user "$SUDO_USER" --net --filesystem --exec -- /bin/bash "$@"
 ```
 
 ```sh
@@ -169,8 +183,8 @@ sudo usermod -aG monitored alice && sudo chsh -s /usr/local/bin/secwrap-login al
 ```
 
 > [!WARNING]
-> Never allow `secwrap` itself in sudoers: `sudo secwrap shell --as-root` gives a root shell. Allow only the script,
-> which fixes every flag.
+> Never allow `secwrap` itself in sudoers: `sudo secwrap shell` gives a root shell. Allow only the script, which
+> fixes every flag and runs the shell as the user (`--user "$SUDO_USER"`).
 
 ## In Docker
 
@@ -181,15 +195,15 @@ sudo usermod -aG monitored alice && sudo chsh -s /usr/local/bin/secwrap-login al
 FROM debian:13
 COPY secwrap /usr/local/bin/
 RUN useradd -m app
-ENTRYPOINT ["secwrap", "shell", "--web-addr", "0.0.0.0:9000", "--", "/bin/bash", "-l"]
+ENTRYPOINT ["secwrap", "shell", "--user", "app", "--web-addr", "0.0.0.0:9000", "--", "/bin/bash", "-l"]
 ```
 
 ```sh
-docker run -it --privileged -v /sys/kernel/security:/sys/kernel/security:ro \
-  -e SUDO_UID=1000 -e SUDO_GID=1000 -e SUDO_USER=app -p 127.0.0.1:9000:9000 my-image
+docker run -it --privileged -v /sys/kernel/security:/sys/kernel/security:ro -p 127.0.0.1:9000:9000 my-image
 ```
 
-If `secwrap` can't create its cgroup, add `--cgroupns=host`.
+The entrypoint runs as root without sudo, so `--user app` says who the shell runs as. If `secwrap` can't create
+its cgroup, add `--cgroupns=host`.
 
 ## Other options
 

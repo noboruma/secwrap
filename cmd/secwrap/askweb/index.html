@@ -8,11 +8,13 @@
   :root {
     --bg: #f6f7f9; --card: #fff; --fg: #1b1f24; --muted: #69707a; --line: #e2e5ea;
     --yes: #1f7a3f; --yes-bg: #e5f4ea; --no: #b42318; --no-bg: #fdecea; --wait: #9a6700; --wait-bg: #fff4d6;
+    --net: #1a56b8; --net-bg: #e3ecfb;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #111418; --card: #1a1e24; --fg: #e6e8eb; --muted: #959ca6; --line: #2a3038;
       --yes: #5fd08a; --yes-bg: #173222; --no: #ff8a80; --no-bg: #3a1a18; --wait: #f2c14e; --wait-bg: #3a3014;
+      --net: #8ab4f8; --net-bg: #172a44;
     }
   }
   * { box-sizing: border-box; }
@@ -47,6 +49,7 @@
   .tag.w { color: var(--no); background: var(--no-bg); }
   .tag.r { color: var(--wait); background: var(--wait-bg); }
   .tag.e { color: var(--fg); background: var(--line); }
+  .tag.n { color: var(--net); background: var(--net-bg); }
   .folder { flex-basis: 100%; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted);
             border-top: 1px dashed var(--line); padding-top: 10px; }
   .folder select { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; max-width: 100%; padding: 6px 8px; border-radius: 6px;

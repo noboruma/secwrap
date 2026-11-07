@@ -22,7 +22,7 @@ const what = (r) => r.access === "exec"
   ? `${r.comm || "?"} (pid ${r.pid}) · ${(r.args || []).join(" ") || "exec"}`
   : r.path
   ? `${r.comm || "?"} (pid ${r.pid}) · file ${r.access}`
-  : `${r.comm || "?"} (pid ${r.pid}) · ${r.proto || "?"} ${r.kind}`;
+  : `${r.comm || "?"} (pid ${r.pid}) · ${r.proto || "?"} ${(r.kind || "").replace(/^udp_/, "")}`;
 
 // forget undoes an answer: the next such call asks again.
 async function forget(id) {
@@ -78,7 +78,7 @@ function render(items) {
     const dis = busy.has(r.id) ? { disabled: "" } : {};
     p.append(el("div", { class: "card pending" },
       el("div", {},
-        el("div", { class: "dest" }, r.path ? el("span", { class: `tag ${r.access[0]}` }, r.access.toUpperCase()) : "", dest(r)),
+        el("div", { class: "dest" }, r.path ? el("span", { class: `tag ${r.access[0]}` }, r.access.toUpperCase()) : el("span", { class: "tag n" }, "NET"), dest(r)),
         el("div", { class: "meta" }, `${what(r)} · ${time(r.time)}`)),
       el("div", { class: "actions" },
         el("button", { class: "yes", onclick: () => answer(r.id, true), ...dis }, "Yes"),
@@ -120,7 +120,7 @@ async function pollSession() {
     $("state").className = `state ${s.alive ? "alive" : "dead"}`;
     $("state-pill").textContent = s.alive ? "alive" : "dead";
     $("state-what").textContent = s.target;
-    $("state-detail").textContent = `${s.user} · ask: ${s.ask} · ${s.detail}`
+    $("state-detail").textContent = `${s.user} · ${s.ask === "ask" ? "asking" : "ask: " + s.ask} · ${s.detail}`
       + (s.history ? ` · recorded in ${s.history}` : "");
   } catch {
     $("state").hidden = true;

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"sort"
@@ -35,7 +34,6 @@ type session struct {
 	allow    stringList
 	sens     stringList
 	// how
-	asRoot  bool
 	user    string // --user: run the command as this user
 	runAs   *user.User
 	log     string // "" (stderr) | off | FILE
@@ -56,7 +54,7 @@ type session struct {
 	stopAsk func()
 }
 
-// newSession registers the common flags. withAsk adds --ask and --as-root,
+// newSession registers the common flags. withAsk adds --ask and --user,
 // which only make sense for a launched command (not attach).
 func newSession(fs *flag.FlagSet, withAsk bool) *session {
 	s := &session{}
@@ -73,9 +71,8 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 		fs.Var(askFlag{s}, "ask", "ask about every category given bare: each call pauses until answered, here in the\n"+
 			"terminal, on the web page or with secwrap session attach (the first answer wins)")
 		fs.BoolVar(&s.noInline, "no-inline", false, "don't ask in the terminal: answer on the web page or with secwrap session attach")
-		fs.BoolVar(&s.asRoot, "as-root", false, "under sudo, run the command as root instead of SUDO_USER")
-		fs.StringVar(&s.user, "user", "", "run the command as this user (name or uid), with its groups and HOME,\n"+
-			"instead of SUDO_USER (needs root)")
+		fs.StringVar(&s.user, "user", "", "run the command as this user (name or uid), with its groups and HOME (default:\n"+
+			"whoever ran secwrap: you when it asked sudo itself, root when started as root)")
 		fs.BoolVar(&s.wait, "wait", false, "when the command exits, keep monitoring its background processes until they exit\n"+
 			"(default: stop them and end the session)")
 	}
@@ -95,7 +92,7 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 
 func (s *session) options(cmd []string) monitor.Options {
 	return monitor.Options{
-		Command: cmd, RunAsInvoker: !s.asRoot, RunAs: s.runAs,
+		Command: cmd, RunAsInvoker: elevated, RunAs: s.runAs,
 		Net: s.net.on, Files: s.files.on, Exec: s.exec.on,
 		NetAction: s.net.act, FilesAction: s.files.act, ExecAction: s.exec.act,
 		SensitivePaths: s.sens, WaitLeftovers: s.wait, FreezeOnAsk: !s.noInline,
@@ -437,14 +434,11 @@ func parseFlags(fs *flag.FlagSet, args []string) {
 	fs.Parse(out)
 }
 
-// resolveUser checks --user against --as-root and looks it up. It runs
+// resolveUser looks --user up. It runs
 // before the command is built (shell picks that user's login shell).
 func (s *session) resolveUser() error {
 	if s.user == "" {
 		return nil
-	}
-	if s.asRoot {
-		return errors.New("--user and --as-root: pick one")
 	}
 	if os.Geteuid() != 0 {
 		return errors.New("--user needs root (sudo)")
@@ -543,7 +537,8 @@ func (s *session) start(cmd []string) error {
 	}
 	asking := s.asking()
 	if asking && len(cmd) > 0 {
-		if _, err := exec.LookPath(cmd[0]); err != nil {
+		o := monitor.Options{Command: cmd, RunAsInvoker: elevated, RunAs: s.runAs}
+		if _, err := o.LookCommand(); err != nil {
 			return fmt.Errorf("command not found: %w", err)
 		}
 	}

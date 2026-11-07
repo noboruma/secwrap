@@ -123,7 +123,8 @@ type Options struct {
 	// /etc/shadow, ...). A directory covers everything below.
 	SensitivePaths []string
 
-	// RunAsInvoker drops the child's privileges to SUDO_UID/SUDO_GID.
+	// RunAsInvoker drops the child's privileges to SUDO_UID/SUDO_GID: set when
+	// secwrap re-ran itself through sudo for a normal user.
 	RunAsInvoker bool
 	// RunAs, if set, is the user the command runs as instead (its uid,
 	// group and supplementary groups, HOME, USER and LOGNAME). Its home is
@@ -536,7 +537,12 @@ func attach(objs *traceObjects, net, deny bool) ([]link.Link, error) {
 func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askConfig) (int, error) {
 	deny := cfg.deny
 	track := func(pid int) error { return tracked.Put(uint32(pid), uint8(1)) }
-	cmd := exec.CommandContext(ctx, opts.Command[0], opts.Command[1:]...)
+	path, err := opts.LookCommand()
+	if err != nil {
+		return 0, err
+	}
+	cmd := exec.CommandContext(ctx, path, opts.Command[1:]...)
+	cmd.Args[0] = opts.Command[0]
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = opts.Stdin, opts.Stdout, opts.Stderr
 	if cmd.Stdin == nil {
 		cmd.Stdin = os.Stdin
@@ -548,11 +554,7 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 		cmd.Stderr = os.Stderr
 	}
 	attr := &syscall.SysProcAttr{}
-	u := opts.RunAs
-	if u == nil && opts.RunAsInvoker {
-		u = SudoUser()
-	}
-	if u != nil {
+	if u := opts.targetUser(); u != nil {
 		cred, err := userCredential(u)
 		if err != nil {
 			return 0, err
@@ -579,10 +581,7 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 	// secwrap's own ask helper, until it has exec'd the target.
 	helperRule := ""
 	if opts.enforcesExec() && cfg.files != nil {
-		target, err := exec.LookPath(opts.Command[0])
-		if err == nil {
-			target, err = filepath.EvalSymlinks(target)
-		}
+		target, err := filepath.EvalSymlinks(path)
 		if err == nil {
 			target, err = filepath.Abs(target)
 		}
@@ -614,7 +613,7 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 	if err := track(self); err != nil {
 		return 0, fmt.Errorf("track self: %w", err)
 	}
-	err := cmd.Start()
+	err = cmd.Start()
 	_ = tracked.Delete(uint32(self))
 	if err != nil {
 		return 0, fmt.Errorf("start %s: %w", opts.Command[0], err)
@@ -753,7 +752,7 @@ func SudoUser() *user.User {
 func (o *Options) Home() string {
 	u := o.RunAs
 	if u == nil {
-		u = SudoUser() // the sudo invoker's, even with --as-root, attach or --all
+		u = SudoUser() // the sudo invoker's, even when the command runs as root, attach or --all
 	}
 	if u != nil && u.HomeDir != "" {
 		return u.HomeDir
@@ -781,15 +780,71 @@ func userCredential(u *user.User) (*syscall.Credential, error) {
 	return cred, nil
 }
 
-// userEnv is our environment with HOME, USER and LOGNAME set for u, as
-// sudo -u would: under sudo they still describe root.
+// invokerEnv is the environment of the user who ran secwrap, from before
+// it re-ran itself through sudo (which resets it); nil otherwise.
+var invokerEnv []string
+
+// SetInvokerEnv hands over the invoking user's environment, for commands
+// that run as that user.
+func SetInvokerEnv(env []string) { invokerEnv = env }
+
+// targetUser is who the command runs as: --user, else the sudo invoker
+// when secwrap re-ran itself through sudo; nil: as us.
+func (o *Options) targetUser() *user.User {
+	if o.RunAs != nil {
+		return o.RunAs
+	}
+	if o.RunAsInvoker {
+		return SudoUser()
+	}
+	return nil
+}
+
+// LookCommand finds the command in the PATH it will run with: the invoking
+// user's when it runs as them, not root's.
+func (o *Options) LookCommand() (string, error) {
+	env := os.Environ()
+	if u := o.targetUser(); u != nil {
+		if e := userEnv(u); e != nil {
+			env = e
+		}
+	}
+	file := o.Command[0]
+	if strings.Contains(file, "/") {
+		return exec.LookPath(file)
+	}
+	path := ""
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			path = v
+		}
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			dir = "."
+		}
+		p := filepath.Join(dir, file)
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%s: not found in PATH", file)
+}
+
+// userEnv is the environment for a command run as u, with HOME, USER and
+// LOGNAME set for u as sudo -u would: the invoking user's own environment
+// when u is them and it was handed over (SetInvokerEnv), else ours.
 func userEnv(u *user.User) []string {
+	base := os.Environ()
+	if inv := SudoUser(); invokerEnv != nil && inv != nil && inv.Uid == u.Uid {
+		base = invokerEnv
+	}
 	if u.HomeDir == "" {
-		return nil // nil: inherit ours
+		return base
 	}
 	set := map[string]string{"HOME": u.HomeDir, "USER": u.Username, "LOGNAME": u.Username}
 	var env []string
-	for _, kv := range os.Environ() {
+	for _, kv := range base {
 		if k, _, _ := strings.Cut(kv, "="); set[k] == "" {
 			env = append(env, kv)
 		}

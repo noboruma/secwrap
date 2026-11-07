@@ -26,6 +26,17 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == monitor.AskHelperArg {
 		monitor.RunAskHelper(os.Args[2:]) // never returns
 	}
+	if len(os.Args) > 1 && os.Args[1] == envCleanupArg {
+		runEnvCleaner(os.Args[2:]) // never returns
+	}
+	if len(os.Args) > 1 && os.Args[1] == invokerEnvArg { // re-run through sudo by elevate
+		rest, err := takeInvokerEnv(os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "secwrap:", err)
+			os.Exit(1)
+		}
+		os.Args = append(os.Args[:1], rest...)
+	}
 	cmds := map[string]func([]string) error{
 		"sbom": cmdSBOM, "monitor": cmdMonitor, "run": cmdRun, "attach": cmdAttach, "shell": cmdShell,
 		"session": cmdSession,
@@ -41,6 +52,10 @@ func main() {
 			return
 		}
 		os.Exit(2)
+	}
+	if err := elevate(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "secwrap:", err)
+		os.Exit(1)
 	}
 	if err := cmd(os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "secwrap:", err)

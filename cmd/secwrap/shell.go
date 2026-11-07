@@ -192,15 +192,15 @@ func loginShell(uid int) string {
 	return "/bin/sh"
 }
 
-// shellUID is the user whose login shell to start: --user, else the sudo
-// invoker unless --as-root, else us.
+// shellUID is the user whose login shell to start: --user, else the user
+// secwrap asked sudo for, else us.
 func (s *session) shellUID() int {
 	if s.runAs != nil {
 		if v, err := strconv.Atoi(s.runAs.Uid); err == nil {
 			return v
 		}
 	}
-	if uid, _, ok := invokerIDs(); ok && !s.asRoot {
+	if uid, _, ok := invokerIDs(); ok && elevated {
 		return uid
 	}
 	return os.Getuid()
