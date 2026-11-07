@@ -348,7 +348,7 @@ func (c closers) close() {
 
 // loadTrace loads the BPF spec and the tracing programs, and attaches them.
 func loadTrace(opts Options, blockNet bool, cleanup *closers) (*ebpf.CollectionSpec, *traceObjects, error) {
-	spec, err := loadNetmon()
+	spec, err := loadSecwrap()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load BPF spec: %w", err)
 	}
@@ -412,7 +412,7 @@ func startReaders(objs *traceObjects, files *fileObjects, emit func(Event), emit
 		return nil
 	}
 	if err := start(objs.Events, func(rd *ringbuf.Reader) {
-		var raw netmonEvent
+		var raw secwrapEvent
 		for {
 			rec, err := rd.Read()
 			if err != nil {
@@ -802,7 +802,7 @@ const (
 	afInet6 = 10
 )
 
-func decode(r *netmonEvent, wallOffset time.Time) Event {
+func decode(r *secwrapEvent, wallOffset time.Time) Event {
 	ev := Event{
 		Time: wallOffset.Add(time.Duration(r.TsNs)),
 		PID:  r.Tgid,

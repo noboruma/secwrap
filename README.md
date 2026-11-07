@@ -1,8 +1,8 @@
-# secwrap
+# `secwrap`
 
 Watch what a process does, and decide what it's allowed to do.
 
-secwrap runs a command (or a whole shell) under eBPF and covers three kinds of access by the process and its children.
+`secwrap` runs a command (or a whole shell) under eBPF and covers three kinds of access by the process and its children.
 For each one, you can **log** it, **ask** before allowing it, or **deny** it:
 
 | Access | Flag | What it covers | `log` | `ask` | `deny` |
@@ -47,15 +47,41 @@ Without the BPF LSM:
 
 ## Usage
 
-Set a mode for each kind of access with `--net`, `--filesystem` and `--exec`: `log`, `ask`, `deny` or `off`.
+Set a mode for each kind of access: `log`, `ask`, `deny` or `off`. A flag given without a mode logs.
+
+| Flag | `log` | `ask` | `deny` |
+| --- | --- | --- | --- |
+| `--net` | `--net log` | `--net ask` | `--net deny` |
+| `--filesystem` | `--filesystem log` | `--filesystem ask` | `--filesystem deny` |
+| `--exec` | `--exec log` | `--exec ask` | `--exec deny` |
+
+`--ask` or `--deny` sets the mode of every flag given without one: `--net --filesystem --ask` asks about both.
 
 ```sh
-sudo secwrap monitor --net --filesystem -- ./mybinary            # observe: log network and file access
+# Network
+sudo secwrap monitor --net log -- ./mybinary                     # log every connection
+sudo secwrap monitor --net ask -- ./install.sh                   # ask before each new connection
 sudo secwrap monitor --net deny -- curl https://example.com      # block all network access
+
+# Files
+sudo secwrap monitor --filesystem log -- ./mybinary              # log every file opened
+sudo secwrap monitor --filesystem ask -- ./install.sh            # ask before each write or sensitive read
+sudo secwrap monitor --filesystem deny -- ./mybinary             # block writes and sensitive reads
+
+# Execution
+sudo secwrap monitor --exec log -- ./mybinary                    # log every program started
+sudo secwrap monitor --exec ask -- ./install.sh                  # ask before each new program
 sudo secwrap monitor --exec deny -- ./mybinary                   # block starting any other program
-sudo secwrap monitor --net ask --filesystem log -- ./install.sh  # ask about network access, log file access
-sudo secwrap shell                                               # an interactive shell where you approve each access
+
+# Combined
+sudo secwrap monitor --net ask --filesystem log -- ./install.sh  # ask about the network, log files
+sudo secwrap shell                                               # an interactive shell that asks about network and files
 ```
+
+Sensitive reads are reads under your home, `/root`, `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers*` and `/etc/ssh/`.
+Use `--sensitive PATH` to add more.
+
+### Answering
 
 When you use `ask`, the process waits until you answer:
 
@@ -68,12 +94,20 @@ When you use `ask`, the process waits until you answer:
 If you deny an access, or don't answer, the call fails with `EPERM`. Press `f` to allow everything under that folder.
 You can also allow folders up front with `--allow`, for example `--allow rw:./build` or `--allow x:/usr/bin`.
 
-You can also answer from the web page at `http://127.0.0.1:9000`, or from another terminal with `sudo secwrap session`.
+Choose where questions are asked with `--answer`:
+
+| Mode | Where you answer |
+| --- | --- |
+| `--answer inline` (default) | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way (Linux 5.19+ with cgroup v2). Questions also appear on the web page and in `secwrap session`; the first answer wins. |
+| `--answer detached` | Only on the web page or in `sudo secwrap session` in another terminal. The command's terminal is left alone. |
+
+The web page is at `http://127.0.0.1:9000` by default. Use `--web-addr ADDR` to change the address, or `--no-web` to
+turn it off. In `inline` mode with no terminal, every question is denied.
 
 ## As a login shell
 
-secwrap can replace a user's default shell through `chsh`, so everything they do (console, SSH, `su -`) is monitored
-from the first process. A login shell gets no flags and secwrap needs root, so use a wrapper that runs a root-owned
+`secwrap` can replace a user's default shell through `chsh`, so everything they do (console, SSH, `su -`) is monitored
+from the first process. A login shell gets no flags and `secwrap` needs root, so use a wrapper that runs a root-owned
 script through sudo:
 
 `/usr/local/bin/secwrap-login`:
@@ -103,8 +137,8 @@ sudo usermod -aG monitored alice && sudo chsh -s /usr/local/bin/secwrap-login al
 
 ## In Docker
 
-secwrap works inside a container. It loads eBPF into the host kernel, so the container needs `--privileged` and
-`/sys/kernel/security`. Use secwrap as the entrypoint, or as a user's login shell (`RUN chsh -s /usr/local/bin/secwrap-login app`).
+`secwrap` works inside a container. It loads eBPF into the host kernel, so the container needs `--privileged` and
+`/sys/kernel/security`. Use `secwrap` as the entrypoint, or as a user's login shell (`RUN chsh -s /usr/local/bin/secwrap-login app`).
 
 ```dockerfile
 FROM debian:13
@@ -118,7 +152,7 @@ docker run -it --privileged -v /sys/kernel/security:/sys/kernel/security:ro \
   -e SUDO_UID=1000 -e SUDO_GID=1000 -e SUDO_USER=app -p 127.0.0.1:9000:9000 my-image
 ```
 
-If secwrap can't create its cgroup, add `--cgroupns=host`.
+If `secwrap` can't create its cgroup, add `--cgroupns=host`.
 
 ## Other options
 
@@ -131,6 +165,13 @@ Run `secwrap --help` to see all options.
 
 ## How it works
 
-The rules are enforced in the kernel by eBPF programs (cgroup socket hooks and LSM hooks), so io_uring, static
-binaries and raw syscalls are covered too. In `ask` mode, seccomp pauses the call until you answer. The eBPF code is in
-[`internal/monitor/netmon.bpf.c`](internal/monitor/netmon.bpf.c).
+The rules are enforced in the kernel by eBPF programs, so io_uring, static binaries and raw syscalls are covered too.
+In `ask` mode, seccomp pauses the call until you answer, and your answer is stored in a map the eBPF programs check.
+
+| File | Watches | Hooks |
+| --- | --- | --- |
+| [`netmon.bpf.c`](internal/monitor/netmon.bpf.c) | Network | `kprobe/tcp_connect`, `kretprobe/inet_csk_accept`, `kprobe/udp_sendmsg`, `kprobe/udpv6_sendmsg`; blocking with `cgroup/connect4/6`, `cgroup/sendmsg4/6`, `cgroup_skb/egress/ingress` |
+| [`filemon.bpf.c`](internal/monitor/filemon.bpf.c) | Files | `lsm/file_open` |
+| [`execmon.bpf.c`](internal/monitor/execmon.bpf.c) | Execution | `lsm/bprm_creds_for_exec` |
+| [`common.bpf.h`](internal/monitor/common.bpf.h) | Shared | The tracked process tree, and the file and folder rules used by `filemon` and `execmon` |
+| [`secwrap.bpf.c`](internal/monitor/secwrap.bpf.c) | Process tree | `tp_btf/sched_process_fork`, `sched_process_exit`; includes the three monitors, built as one eBPF object so they share maps |

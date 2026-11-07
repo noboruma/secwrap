@@ -3,7 +3,7 @@
 package monitor
 
 // File access: a BPF LSM file_open program reports every open by the traced
-// tree and, in ask mode, enforces the user's answers (see netmon.bpf.c).
+// tree and, in ask mode, enforces the user's answers (see filemon.bpf.c).
 // fileScope mirrors the BPF "in scope" rules, so the seccomp supervisor can
 // ask about exactly the opens the LSM program would refuse.
 
@@ -121,7 +121,7 @@ func (o *fileObjects) allow(path string, bits uint8) error {
 	return o.FileRules.Put(k, bits)
 }
 
-// dirHashes mirrors dir_allowed in netmon.bpf.c.
+// dirHashes mirrors dir_allowed in common.bpf.h.
 func (o *fileObjects) dirHashes(dir string) (h1, h2 uint64) {
 	const p1, p2 = 0x100000001b3, 0x9e3779b97f4a7c15
 	h1, h2 = o.seed1, o.seed2
@@ -325,7 +325,7 @@ func boolByte(b bool) uint8 {
 
 // readFileEvents decodes file_events until the reader is closed.
 func readFileEvents(rd *ringbuf.Reader, wallOffset time.Time, emit func(FileEvent)) {
-	var raw netmonFileEvent
+	var raw secwrapFileEvent
 	for {
 		rec, err := rd.Read()
 		if err != nil {
@@ -351,7 +351,7 @@ func kind(flags uint32) string {
 	return "open"
 }
 
-func fileEventPath(r *netmonFileEvent) string {
+func fileEventPath(r *secwrapFileEvent) string {
 	if r.Flags&fileLongPath != 0 {
 		return "(path too long)"
 	}
@@ -359,7 +359,7 @@ func fileEventPath(r *netmonFileEvent) string {
 }
 
 // ---------------------------------------------------------------------------
-// Scope (must match path_excluded / path_sensitive in netmon.bpf.c)
+// Scope (must match path_excluded / path_sensitive in filemon.bpf.c)
 
 type sensPath struct {
 	path string

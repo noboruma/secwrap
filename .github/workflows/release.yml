@@ -1,6 +1,6 @@
 # Builds secwrap for Linux amd64 and attaches the binary (and its SHA-256
 # checksum) to a GitHub release when it is published. The eBPF objects are
-# generated for x86 only (internal/monitor/netmon_x86_bpfel.*, committed).
+# generated for x86 only (internal/monitor/secwrap_x86_bpfel.*, committed).
 name: release
 
 on:

@@ -16,4 +16,4 @@ build: generate
 	go build -trimpath -o $(BIN) ./cmd/secwrap
 
 clean:
-	rm -f $(BIN) internal/monitor/netmon_*_bpfel.*
+	rm -f $(BIN) internal/monitor/secwrap_*_bpfel.*
