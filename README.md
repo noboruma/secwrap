@@ -107,15 +107,15 @@ When you use `ask`, the process waits until you answer:
 If you deny an access, or don't answer, the call fails with `EPERM`. Press `f` to allow everything under that folder.
 You can also allow folders up front with `--allow`, for example `--allow rw:./build` or `--allow x:/usr/bin`.
 
-Choose where questions are asked with `--answer`:
+Every question can be answered in three places at once; the first answer wins:
 
-| Mode | Where you answer |
-| --- | --- |
-| `--answer inline` (default) | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way (Linux 5.19+ with cgroup v2). Questions also appear on the web page and in `secwrap session`; the first answer wins. |
-| `--answer detached` | Only on the web page or in `sudo secwrap session` in another terminal. The command's terminal is left alone. |
+| Where | | Turn off with |
+| --- | --- | --- |
+| Inline | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way (Linux 5.19+ with cgroup v2). | `--no-inline` |
+| Web page | `http://127.0.0.1:9000` by default; `--web-addr ADDR` changes the address. | `--no-web` |
+| `sudo secwrap session` | In another terminal: `secwrap session attach`, or the terminal UI. | Always on |
 
-The web page is at `http://127.0.0.1:9000` by default. Use `--web-addr ADDR` to change the address, or `--no-web` to
-turn it off. In `inline` mode with no terminal, every question is denied.
+Without a terminal, inline questions step aside and wait for the web page or `secwrap session`.
 
 ## As a login shell
 

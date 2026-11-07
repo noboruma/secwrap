@@ -65,7 +65,7 @@ What to watch, and what to do with each: off, log, ask or deny (shell: --net --f
   --exec [MODE]         programs executed (BPF LSM); deny/ask: every exec but CMD
   --sbom [DIR]          a CycloneDX SBOM in DIR (default: the history folder) for every binary executed
   --deny, --ask         the mode of categories given bare (default: log)
-  --answer inline|detached  ask here in the terminal too (default), or only from secwrap session (attach, web page)
+  --no-inline           don't ask in the terminal (the web page and secwrap session attach always can)
   --web-addr ADDR       serve every session's web page at ADDR (default 127.0.0.1:9000; 9000, :9000, 0.0.0.0:9100)
                         unless a secwrap already serves that address; one host per address, all show every session
   --no-web              don't serve it

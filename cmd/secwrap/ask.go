@@ -221,10 +221,11 @@ func pickFolder(w io.Writer, it webItem, read func() (string, readResult)) (stri
 }
 
 // ---------------------------------------------------------------------------
-// --answer inline
+// Inline questions (unless --no-inline)
 
 // ttyAsker asks on the controlling terminal (not stdin, which belongs to the
-// target), one question at a time. Anything but yes, or no terminal, denies.
+// target), one question at a time. Anything but yes denies. Without a
+// terminal it leaves the question to the web page and attach.
 //
 // The terminal is shared with the target (and in secwrap shell, owned by
 // the shell), so for each question it is borrowed: the target's tree is
@@ -322,8 +323,11 @@ func (t *ttyAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.AskAns
 	defer func() { <-t.sem }()
 
 	t.once.Do(t.open)
-	if t.err != nil {
-		fmt.Fprintf(os.Stderr, "secwrap: --answer inline: no terminal (%v), denying\n", t.err)
+	if t.err != nil { // the web page and attach still answer
+		t.warnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "secwrap: no terminal for inline questions (%v); answer on the web page or with secwrap session attach\n", t.err)
+		})
+		<-ctx.Done()
 		return deny
 	}
 	if t.needFreeze && r.Freeze == nil {

@@ -49,7 +49,7 @@ type sessionInfo struct {
 	RunAs    string     `json:"runAs,omitempty"` // --user: who the command runs as
 	Target   string     `json:"target"`          // what is watched: the command, attach PIDs, all
 	Watch    []string   `json:"watch"`           // net, filesystem, exec
-	Ask      string     `json:"ask"`             // "" (record), deny, session, tty
+	Ask      string     `json:"ask"`             // "" (record), deny, ask (older: session, tty, inline, detached)
 	Started  time.Time  `json:"started"`
 	Ended    *time.Time `json:"ended,omitempty"`
 	ExitCode *int       `json:"exitCode,omitempty"`

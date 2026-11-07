@@ -27,15 +27,13 @@ type session struct {
 	sbomDir          string
 	sbomTemp         bool // bare --sbom: in the history folder (or /tmp)
 	// what to do with it
-	deny      bool   // --deny: the action of categories given bare
-	askOn     bool   // --ask: the same, asking (wins over --deny)
-	askSet    bool   // --ask was given (shell: --deny alone turns asking off)
-	answer    string // inline | detached: where questions are answered
-	askAlias  string // the --answer implied by --ask tty|session|ADDR
-	defAnswer string // --answer when neither it nor --ask says (default inline)
-	shell     bool   // secwrap shell: inline questions only with freezing
-	allow     stringList
-	sens      stringList
+	deny     bool // --deny: the action of categories given bare
+	askOn    bool // --ask: the same, asking (wins over --deny)
+	askSet   bool // --ask was given (shell: --deny alone turns asking off)
+	noInline bool // --no-inline: don't ask in the terminal (the web page and attach still do)
+	shell    bool // secwrap shell: inline questions only with freezing
+	allow    stringList
+	sens     stringList
 	// how
 	asRoot  bool
 	user    string // --user: run the command as this user
@@ -72,10 +70,9 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 		"bare --sbom: sboms/ in the session's history folder (/tmp with --history off)")
 	fs.BoolVar(&s.deny, "deny", false, "deny every category given bare (--net, --filesystem, --exec without a mode)")
 	if withAsk {
-		fs.Var(askFlag{s}, "ask", "ask about every category given bare: each call pauses until answered (see --answer);\n"+
-			"ADDR is short for --ask --answer detached --web-addr ADDR")
-		fs.Var(answerFlag{&s.answer}, "answer", "where questions are answered: inline (here in the terminal, and from the web\n"+
-			"page or secwrap session attach, first answer wins) or detached (only the web page and attach)")
+		fs.Var(askFlag{s}, "ask", "ask about every category given bare: each call pauses until answered, here in the\n"+
+			"terminal, on the web page or with secwrap session attach (the first answer wins)")
+		fs.BoolVar(&s.noInline, "no-inline", false, "don't ask in the terminal: answer on the web page or with secwrap session attach")
 		fs.BoolVar(&s.asRoot, "as-root", false, "under sudo, run the command as root instead of SUDO_USER")
 		fs.StringVar(&s.user, "user", "", "run the command as this user (name or uid), with its groups and HOME,\n"+
 			"instead of SUDO_USER (needs root)")
@@ -101,7 +98,7 @@ func (s *session) options(cmd []string) monitor.Options {
 		Command: cmd, RunAsInvoker: !s.asRoot, RunAs: s.runAs,
 		Net: s.net.on, Files: s.files.on, Exec: s.exec.on,
 		NetAction: s.net.act, FilesAction: s.files.act, ExecAction: s.exec.act,
-		SensitivePaths: s.sens, WaitLeftovers: s.wait, FreezeOnAsk: s.answer == "inline",
+		SensitivePaths: s.sens, WaitLeftovers: s.wait, FreezeOnAsk: !s.noInline,
 	}
 }
 
@@ -138,7 +135,7 @@ func (s *session) run(ctx context.Context, o monitor.Options) (*monitor.Report, 
 	}
 	// Bare --sbom, or asking with the web page (it lists the binaries run, with
 	// their SBOMs, when the BPF LSM is there): in the history folder, or /tmp.
-	if s.sbomDir == "" && (s.sbomTemp || s.asking() && (s.answer == "detached" || s.web != "") && monitor.BPFLSMEnabled()) {
+	if s.sbomDir == "" && (s.sbomTemp || s.asking() && s.web != "" && monitor.BPFLSMEnabled()) {
 		if err := s.tempSBOMDir(); err != nil {
 			return nil, err
 		}
@@ -337,20 +334,17 @@ func (f catFlag) Set(v string) error {
 	return nil
 }
 
-// askFlag is --ask [off|inline|detached|ADDR]: bare, every category given
-// bare is asked about, answered as --answer says. inline and detached
-// (and their old spellings tty/stdout and session) also set --answer; an
-// address is short for --ask --answer detached --web-addr ADDR.
+// askFlag is --ask [on|off]: every category given bare is asked about.
 type askFlag struct{ s *session }
 
 func (f askFlag) IsBoolFlag() bool { return true }
 func (f askFlag) optionalValue()   {}
 func (f askFlag) accepts(v string) bool {
 	switch v {
-	case "true", "false", "on", "off", "tty", "stdout", "session", "inline", "detached":
+	case "true", "false", "on", "off":
 		return true
 	}
-	return looksLikeAddr(v)
+	return false
 }
 
 func (f askFlag) String() string {
@@ -363,49 +357,19 @@ func (f askFlag) String() string {
 func (f askFlag) Set(v string) error {
 	s := f.s
 	s.askOn, s.askSet = true, true
-	switch {
-	case v == "true" || v == "on":
-	case v == "false" || v == "off":
-		s.askOn = false
-	case v == "inline" || v == "tty" || v == "stdout":
-		s.askAlias = "inline"
-	case v == "detached" || v == "session":
-		s.askAlias = "detached"
-	case looksLikeAddr(v):
-		s.askAlias, s.web, s.webSet = "detached", normalizeAddr(v), true
-	default:
-		return fmt.Errorf("want off, inline, detached or an address (9000, :9000, 127.0.0.1:9000), not %q", v)
-	}
-	return nil
-}
-
-// answerFlag is --answer inline|detached.
-type answerFlag struct{ p *string }
-
-func (f answerFlag) String() string {
-	if f.p == nil {
-		return ""
-	}
-	return *f.p
-}
-
-func (f answerFlag) Set(v string) error {
 	switch v {
-	case "inline", "tty", "stdout":
-		*f.p = "inline"
-	case "detached", "session":
-		*f.p = "detached"
+	case "true", "on":
+	case "false", "off":
+		s.askOn = false
 	default:
-		return fmt.Errorf("want inline or detached, not %q", v)
+		return fmt.Errorf("want on or off, not %q", v)
 	}
 	return nil
 }
 
 // resolve gives the categories given bare the action of --ask (first) or
-// --deny, and picks where questions are answered: --answer, else what
-// --ask implied, else s.defAnswer (inline). --deny without --ask turns a
-// default --ask (shell) off.
-func (s *session) resolve(explicitAnswer bool) {
+// --deny. --deny without --ask turns a default --ask (shell) off.
+func (s *session) resolve() {
 	if s.deny && !s.askSet {
 		s.askOn = false
 	}
@@ -421,23 +385,12 @@ func (s *session) resolve(explicitAnswer bool) {
 			c.act = act
 		}
 	}
-	switch {
-	case explicitAnswer:
-	case s.askAlias != "":
-		s.answer = s.askAlias
-	case s.defAnswer != "":
-		s.answer = s.defAnswer
-	default:
-		s.answer = "inline"
-	}
 }
 
 // parse parses args into fs (see parseFlags), then checks --user.
 func (s *session) parse(fs *flag.FlagSet, args []string) {
 	parseFlags(fs, args)
-	explicit := false
-	fs.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "answer" })
-	s.resolve(explicit)
+	s.resolve()
 	if err := s.resolveUser(); err != nil {
 		fmt.Fprintln(os.Stderr, "secwrap:", err)
 		os.Exit(2)
@@ -523,7 +476,7 @@ func (s *session) info(o monitor.Options) sessionInfo {
 	}
 	switch {
 	case o.Asks():
-		i.Ask = s.answer
+		i.Ask = "ask"
 	case deny:
 		i.Ask = "deny"
 	}
@@ -594,9 +547,11 @@ func (s *session) start(cmd []string) error {
 			return fmt.Errorf("command not found: %w", err)
 		}
 	}
-	if asking { // every question goes to the session files; tty races them
+	// Every question goes to the session files (the web page and attach
+	// answer them there); unless --no-inline, the terminal races them.
+	if asking {
 		var tty func(context.Context, monitor.AskRequest) monitor.AskAnswer
-		if s.answer == "inline" {
+		if !s.noInline {
 			t := newTTYAsker()
 			t.needFreeze = s.shell
 			tty = t.ask

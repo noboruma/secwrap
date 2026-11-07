@@ -33,8 +33,8 @@ func cmdShell(args []string) error {
 		fs.Lookup(name).DefValue = v
 		fs.Set(name, v)
 	}
-	s.askOn, s.defAnswer, s.shell = true, "inline", true
-	fs.Lookup("ask").DefValue, fs.Lookup("answer").DefValue = "on", "inline"
+	s.askOn, s.shell = true, true
+	fs.Lookup("ask").DefValue = "on"
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: secwrap shell [flags] [-- SHELL [ARGS...]]")
 		fs.PrintDefaults()
