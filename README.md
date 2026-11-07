@@ -50,6 +50,9 @@ Started as root, `sudo secwrap …` included, `secwrap` takes it that you want t
 ### Requirements
 
 - Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), on any architecture listed above.
+- **Root access through `sudo`** (or running as root). `secwrap` asks for your password once, at startup. It then
+  keeps root for itself until the session ends, because the eBPF programs stop when it exits. The command you
+  monitor runs as you (see [Running as root](#running-as-root)).
 - Asking with the process paused (the shell and the inline prompt): Linux 5.19+ with cgroup v2. On older kernels,
   `monitor` still asks without pausing, while `shell` only takes answers from the web page or `secwrap session`.
 - The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
