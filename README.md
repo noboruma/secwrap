@@ -26,7 +26,24 @@ curl -fsSL -o secwrap "https://github.com/noboruma/secwrap/releases/latest/downl
 chmod +x secwrap
 ```
 
-Requires root, Linux 5.10+ (amd64) and the BPF LSM enabled (`bpf` in `/sys/kernel/security/lsm`, the default on Debian 13).
+### Requirements
+
+- Root, Linux 5.10+, amd64.
+- Asking with the process paused (the shell and the inline prompt): Linux 5.19+ with cgroup v2. On older kernels,
+  `monitor` still asks without pausing, while `shell` only takes answers from the web page or `secwrap session`.
+- The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
+  default on Debian 13). Otherwise add it to the kernel command line, e.g. `lsm=...,bpf`.
+
+Without the BPF LSM:
+
+| Feature | Without the BPF LSM |
+| --- | --- |
+| `--net` (log, ask, deny) | Works: it uses cgroup and kprobe hooks, not the LSM |
+| `--filesystem` | Refused at startup |
+| `--exec` | Refused at startup |
+| `--sbom` | Refused at startup |
+| `secwrap shell` | Refused at startup, because it turns on `--filesystem` by default. Run `secwrap shell --filesystem off` to watch the network only |
+| Binaries and SBOMs on the web page | Not collected; the page lists no binaries |
 
 ## Usage
 
@@ -52,6 +69,56 @@ If you deny an access, or don't answer, the call fails with `EPERM`. Press `f` t
 You can also allow folders up front with `--allow`, for example `--allow rw:./build` or `--allow x:/usr/bin`.
 
 You can also answer from the web page at `http://127.0.0.1:9000`, or from another terminal with `sudo secwrap session`.
+
+## As a login shell
+
+secwrap can replace a user's default shell through `chsh`, so everything they do (console, SSH, `su -`) is monitored
+from the first process. A login shell gets no flags and secwrap needs root, so use a wrapper that runs a root-owned
+script through sudo:
+
+`/usr/local/bin/secwrap-login`:
+
+```sh
+#!/bin/sh
+[ $# -eq 0 ] && set -- -l
+exec sudo -n /usr/local/sbin/secwrap-session "$@"
+```
+
+`/usr/local/sbin/secwrap-session`, owned by root:
+
+```sh
+#!/bin/sh
+exec /usr/local/bin/secwrap shell --net --filesystem --exec -- /bin/bash "$@"
+```
+
+```sh
+echo '%monitored ALL=(root) NOPASSWD: /usr/local/sbin/secwrap-session' | sudo tee /etc/sudoers.d/secwrap
+echo /usr/local/bin/secwrap-login | sudo tee -a /etc/shells
+sudo usermod -aG monitored alice && sudo chsh -s /usr/local/bin/secwrap-login alice
+```
+
+> [!WARNING]
+> Never allow `secwrap` itself in sudoers: `sudo secwrap shell --as-root` gives a root shell. Allow only the script,
+> which fixes every flag.
+
+## In Docker
+
+secwrap works inside a container. It loads eBPF into the host kernel, so the container needs `--privileged` and
+`/sys/kernel/security`. Use secwrap as the entrypoint, or as a user's login shell (`RUN chsh -s /usr/local/bin/secwrap-login app`).
+
+```dockerfile
+FROM debian:13
+COPY secwrap /usr/local/bin/
+RUN useradd -m app
+ENTRYPOINT ["secwrap", "shell", "--web-addr", "0.0.0.0:9000", "--", "/bin/bash", "-l"]
+```
+
+```sh
+docker run -it --privileged -v /sys/kernel/security:/sys/kernel/security:ro \
+  -e SUDO_UID=1000 -e SUDO_GID=1000 -e SUDO_USER=app -p 127.0.0.1:9000:9000 my-image
+```
+
+If secwrap can't create its cgroup, add `--cgroupns=host`.
 
 ## Other options
 
