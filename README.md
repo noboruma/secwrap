@@ -23,10 +23,13 @@ or download a static binary from the [releases](https://github.com/noboruma/secw
 `amd64`, `386`, `arm64`, `arm`, `mips`, `mipsle`, `mips64`, `mips64le`, `riscv64`, `ppc64le`, `s390x` and `loong64`:
 
 ```sh
-arch=arm64   # or amd64, 386, arm, mips, mipsle, ...
+arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/i.86/386/;s/armv.*/arm/;s/loongarch64/loong64/')
+case $arch in mips*) [ "$(printf '\1\0' | od -An -tu2 | tr -d ' ')" = 1 ] && arch=${arch}le ;; esac
 curl -fsSL -o secwrap "https://github.com/noboruma/secwrap/releases/latest/download/secwrap-linux-$arch"
 chmod +x secwrap
 ```
+
+`uname -m` doesn't say whether a mips CPU is little-endian, so the second line checks that.
 
 `make dist` builds them all into `dist/`.
 
@@ -91,8 +94,29 @@ sudo secwrap monitor --net ask --filesystem log -- ./install.sh  # ask about the
 sudo secwrap shell                                               # an interactive shell that asks about network and files
 ```
 
-Sensitive reads are reads under your home, `/root`, `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers*` and `/etc/ssh/`.
-Use `--sensitive PATH` to add more.
+#### Which file reads are asked about
+
+Files work differently from the network and programs. Any program reads hundreds of files just to start (libraries,
+locale data, configuration), so asking about or blocking every read would bury you in questions and break most
+programs. Instead, `ask` and `deny` cover:
+
+- **every write** (including creating or truncating a file), except in `/proc`, `/sys` and `/dev`;
+- **reads of sensitive paths only**, where secrets usually live:
+  - your home directory (SSH keys, tokens, browser profiles, `.env` files…)
+  - `/root`
+  - `/etc/shadow` and `/etc/gshadow`
+  - `/etc/sudoers` and `/etc/sudoers.d/`
+  - `/etc/ssh/`
+
+Other reads are never asked about or blocked. With `log`, every open is still recorded, reads included.
+
+Add your own sensitive files or folders with `--sensitive` (repeatable). It only changes which **reads** are asked
+about or blocked: writes are covered everywhere already, sensitive or not. The list holds 16 paths in total, the
+defaults included, so you can add up to 9. A folder covers everything inside it:
+
+```sh
+sudo secwrap monitor --filesystem ask --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./install.sh
+```
 
 ### Answering
 
