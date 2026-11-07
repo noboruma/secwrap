@@ -1,9 +1,9 @@
 # On a pushed version tag (v1.2.3, or v1.2.3-rc1 for a pre-release), builds
 # secwrap for every Linux architecture in the Makefile's ARCHES, creates the
 # GitHub release with generated notes, and attaches the binaries and their
-# SHA-256 checksums. If the release already exists, only the files are
-# (re)uploaded. The eBPF objects are generated once per byte order
-# (internal/monitor/secwrap_bpfel.* and secwrap_bpfeb.*, committed).
+# SHA-256 checksums (make dist). If the release already exists, only the
+# files are (re)uploaded. The eBPF objects are generated here (make
+# generate), once per byte order.
 name: release
 
 on:
@@ -23,19 +23,19 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install clang and the libbpf headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang llvm libbpf-dev
+
+      # The eBPF objects (internal/monitor/secwrap_bpfe[lb].*) from the
+      # .bpf.c sources, so the release never ships stale ones.
+      - name: Generate
+        run: make generate
+
       - name: Test
         run: go test ./...
 
       - name: Build
-        run: |
-          mkdir -p dist
-          for a in amd64 386 arm64 arm mips mipsle mips64 mips64le riscv64 ppc64le s390x loong64; do
-            name="secwrap-linux-${a}"
-            # static binaries, run on any Linux distribution; mips without an FPU
-            CGO_ENABLED=0 GOOS=linux GOARCH="$a" GOMIPS=softfloat GOMIPS64=softfloat \
-              go build -trimpath -ldflags "-s -w" -o "dist/${name}" ./cmd/secwrap
-            (cd dist && sha256sum "${name}" > "${name}.sha256")
-          done
+        run: make dist
 
       - name: Create the release
         env:

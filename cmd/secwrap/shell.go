@@ -40,6 +40,12 @@ func cmdShell(args []string) error {
 		fs.PrintDefaults()
 	}
 	s.parse(fs, args)
+	// --filesystem is only a default here: without the BPF LSM, watch the
+	// network alone rather than refuse to start. Asked for, it still fails.
+	if s.files.on && !s.caps.Files().Log && !flagGiven(args, "filesystem") {
+		fmt.Fprintf(os.Stderr, "secwrap: filesystem unavailable (%s): watching the network only\n", s.caps.Files().Why)
+		s.files.on = false
+	}
 
 	argv, cleanup, err := shellCommand(fs.Args(), s.shellUID())
 	if err != nil {
@@ -204,4 +210,18 @@ func (s *session) shellUID() int {
 		return uid
 	}
 	return os.Getuid()
+}
+
+// flagGiven reports whether args set --name (before any "--").
+func flagGiven(args []string, name string) bool {
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		a = strings.TrimLeft(a, "-")
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
 }

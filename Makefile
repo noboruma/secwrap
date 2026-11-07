@@ -20,13 +20,14 @@ generate:
 build: generate
 	go build -trimpath -o $(BIN) ./cmd/secwrap
 
-# Static binaries for every architecture in dist/ (mips: softfloat, for CPUs
-# without an FPU).
+# Static binaries for every architecture in dist/, each with its SHA-256
+# checksum (mips: softfloat, for CPUs without an FPU).
 dist: generate
 	mkdir -p dist
 	for a in $(ARCHES); do \
 		CGO_ENABLED=0 GOOS=linux GOARCH=$$a GOMIPS=softfloat GOMIPS64=softfloat \
 			go build -trimpath -ldflags "-s -w" -o dist/$(BIN)-linux-$$a ./cmd/secwrap || exit 1; \
+		(cd dist && sha256sum $(BIN)-linux-$$a > $(BIN)-linux-$$a.sha256) || exit 1; \
 	done
 
 clean:

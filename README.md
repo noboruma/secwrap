@@ -49,6 +49,20 @@ Started as root, `sudo secwrap …` included, `secwrap` takes it that you want t
 
 ### Requirements
 
+`secwrap cap` checks this kernel, without root, and says what is available and what is missing:
+
+```
+$ secwrap cap
+Linux 6.12.1 (armv7l)
+  network     log ask deny
+  filesystem  unavailable   (armv7l kernels can't run BPF LSM programs)
+  exec        unavailable   (armv7l kernels can't run BPF LSM programs)
+  sbom        unavailable   (armv7l kernels can't run BPF LSM programs)
+  pause       no            (inline questions can't freeze the command: needs cgroup v2 and Linux 5.19+)
+```
+
+Every session runs the same check at startup and refuses what the kernel can't do, saying why.
+
 - Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), on any architecture listed above.
 - **Root access through `sudo`** (or running as root). `secwrap` asks for your password once, at startup. It then
   keeps root for itself until the session ends, because the eBPF programs stop when it exits. The command you
@@ -72,10 +86,10 @@ Without the BPF LSM, or on a kernel that can't run it:
 | Feature | Without the BPF LSM |
 | --- | --- |
 | `--net` (log, ask, deny) | Works: it uses cgroup and kprobe hooks, not the LSM |
-| `--filesystem` | Refused at startup |
-| `--exec` | Refused at startup |
-| `--sbom` | Refused at startup |
-| `secwrap shell` | Refused at startup, because it turns on `--filesystem` by default. Run `secwrap shell --filesystem off` to watch the network only |
+| `--filesystem` | Refused at startup, with the reason |
+| `--exec` | Refused at startup, with the reason |
+| `--sbom` | Refused at startup, with the reason |
+| `secwrap shell` | Watches the network only, and says why (`--filesystem` is only its default) |
 | Binaries and SBOMs on the web page | Not collected; the page lists no binaries |
 
 ## Usage

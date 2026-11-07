@@ -52,12 +52,13 @@ type session struct {
 	logF    *os.File
 	asker   func(context.Context, monitor.AskRequest) monitor.AskAnswer
 	stopAsk func()
+	caps    monitor.Caps // what this kernel supports
 }
 
 // newSession registers the common flags. withAsk adds --ask and --user,
 // which only make sense for a launched command (not attach).
 func newSession(fs *flag.FlagSet, withAsk bool) *session {
-	s := &session{}
+	s := &session{caps: monitor.ProbeCaps()}
 	modes := "off, log, ask or deny (bare: log, or --deny/--ask)"
 	fs.Var(catFlag{&s.net}, "net", "watch the network: TCP connect/accept, UDP sends; "+modes)
 	fs.Var(catFlag{&s.files}, "filesystem", "watch file opens (BPF LSM); "+modes+";\n"+
@@ -107,6 +108,10 @@ func (s *session) run(ctx context.Context, o monitor.Options) (*monitor.Report, 
 	onBinary := func(e monitor.FileEvent) { s.sboms.onExec(e) }
 	if s.sbomDir != "" || s.sbomTemp {
 		o.OnBinary = onBinary
+	}
+	// What this kernel can't do fails here, with why, before anything loads.
+	if err := s.caps.Check(&o); err != nil {
+		return nil, err
 	}
 	sess, err := createSession(sessionName(o), s.info(o))
 	if err != nil {
@@ -482,18 +487,21 @@ func (s *session) info(o monitor.Options) sessionInfo {
 
 // announce lists what is watched and how, then where the session is.
 func (s *session) announce() {
-	mode := func(c category) string {
-		if !c.on {
-			return "OFF"
+	mode := func(c category, m monitor.Modes) string {
+		switch {
+		case c.on:
+			return strings.ToUpper(c.act.String())
+		case !m.Log: // say why it can't be turned on
+			return "OFF (unavailable: " + m.Why + ")"
 		}
-		return strings.ToUpper(c.act.String())
+		return "OFF"
 	}
 	sbom := "OFF"
 	if s.sbomDir != "" {
 		sbom = "ON"
 	}
 	fmt.Fprintf(os.Stderr, "NETWORK:    %s\nFILESYSTEM: %s\nEXEC:       %s\nSBOM:       %s\n",
-		mode(s.net), mode(s.files), mode(s.exec), sbom)
+		mode(s.net, s.caps.Net()), mode(s.files, s.caps.Files()), mode(s.exec, s.caps.Files()), sbom)
 
 	// Our address's page (whoever hosts it), else any page: they all show
 	// every session.

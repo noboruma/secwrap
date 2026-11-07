@@ -39,7 +39,7 @@ func main() {
 	}
 	cmds := map[string]func([]string) error{
 		"sbom": cmdSBOM, "monitor": cmdMonitor, "run": cmdRun, "attach": cmdAttach, "shell": cmdShell,
-		"session": cmdSession,
+		"session": cmdSession, "cap": cmdCap,
 	}
 	name := ""
 	if len(os.Args) > 1 {
@@ -72,6 +72,7 @@ func usage() {
   secwrap attach  [flags] (PID... | --name N)   monitor running processes and their children
   secwrap shell   [flags] [-- SHELL ...]        shell where everything you run is monitored
   secwrap session                              sessions alive and dead in a terminal UI: attach, delete
+  secwrap cap                                  what this kernel supports: network, filesystem, exec, sbom
   secwrap session list | attach [ID] | delete ID  list; answer one's questions here (root); delete dead ones
 
 What to watch, and what to do with each: off, log, ask or deny (shell: --net --filesystem --ask):
