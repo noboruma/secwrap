@@ -35,9 +35,4 @@ func printCaps(w io.Writer, c monitor.Caps) {
 	} else {
 		line("sbom", "unavailable", files.Why)
 	}
-	if c.Freeze {
-		line("pause", "yes", "")
-	} else {
-		line("pause", "no", "inline questions can't freeze the command: needs cgroup v2 and Linux 5.19+")
-	}
 }

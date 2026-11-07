@@ -11,14 +11,14 @@ func TestPrintCaps(t *testing.T) {
 	full := monitor.Caps{Kernel: "6.12.1", Machine: "x86_64", BTF: true, Kprobes: true, CgroupV2: true,
 		SeccompNotif: true, Freeze: true, LSM: true}
 	noLSM := full
-	noLSM.Machine, noLSM.LSM, noLSM.LSMWhy, noLSM.Freeze = "armv7l", false, "armv7l kernels can't run BPF LSM programs", false
+	noLSM.Machine, noLSM.LSM, noLSM.LSMWhy, noLSM.Freeze, noLSM.Kernel = "armv7l", false, "armv7l kernels can't run BPF LSM programs", false, "5.15.0"
 	for _, c := range []struct {
 		caps monitor.Caps
 		want []string
 	}{
-		{full, []string{"network     log ask deny\n", "filesystem  log ask deny\n", "pause       yes\n"}},
-		{noLSM, []string{"network     log ask deny\n", "filesystem  unavailable   (armv7l kernels can't run BPF LSM programs)",
-			"sbom        unavailable", "pause       no"}},
+		{full, []string{"network     log ask deny\n", "filesystem  log ask deny\n"}},
+		{noLSM, []string{"network     log deny      (ask needs cgroup v2 and Linux 5.19+ to freeze the command)",
+			"filesystem  unavailable   (armv7l kernels can't run BPF LSM programs)\n", "sbom        unavailable"}},
 	} {
 		var b strings.Builder
 		printCaps(&b, c.caps)
@@ -32,7 +32,7 @@ func TestPrintCaps(t *testing.T) {
 }
 
 func TestCapsCheck(t *testing.T) {
-	c := monitor.Caps{BTF: true, Kprobes: true, CgroupV2: true, SeccompNotif: true, LSMWhy: `"bpf" not in /sys/kernel/security/lsm`}
+	c := monitor.Caps{BTF: true, Kprobes: true, CgroupV2: true, SeccompNotif: true, Freeze: true, LSMWhy: `"bpf" not in /sys/kernel/security/lsm`}
 	ok := monitor.Options{Net: true, NetAction: monitor.ActionAsk}
 	if err := c.Check(&ok); err != nil {
 		t.Errorf("--net ask: %v", err)
@@ -47,6 +47,12 @@ func TestCapsCheck(t *testing.T) {
 	err = noCgroup.Check(&monitor.Options{Net: true, NetAction: monitor.ActionDeny})
 	if err == nil || !strings.Contains(err.Error(), "--net can log") {
 		t.Errorf("--net deny without cgroup v2: got %v", err)
+	}
+	t.Log(err)
+	noFreeze := monitor.Caps{BTF: true, Kprobes: true, CgroupV2: true, SeccompNotif: true}
+	err = noFreeze.Check(&monitor.Options{Net: true, NetAction: monitor.ActionAsk})
+	if err == nil || !strings.Contains(err.Error(), "--net can log deny") {
+		t.Errorf("--net ask without freezing: got %v", err)
 	}
 	t.Log(err)
 }

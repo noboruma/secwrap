@@ -555,9 +555,7 @@ func (s *session) start(cmd []string) error {
 	if asking {
 		var tty func(context.Context, monitor.AskRequest) monitor.AskAnswer
 		if !s.noInline {
-			t := newTTYAsker()
-			t.needFreeze = s.shell
-			tty = t.ask
+			tty = newTTYAsker().ask
 		}
 		sa := newSessionAsker(s.sess, tty)
 		s.asker, s.stopAsk = sa.ask, sa.close

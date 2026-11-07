@@ -24,7 +24,7 @@ type Caps struct {
 	Kprobes      bool   // the kprobe PMU: network logging
 	CgroupV2     bool   // network deny and ask (cgroup hooks), freezing
 	SeccompNotif bool   // ask (SECCOMP_RET_USER_NOTIF)
-	Freeze       bool   // inline questions freeze the command: cgroup v2, Linux 5.19+
+	Freeze       bool   // the command can be frozen while a question is up: cgroup v2, Linux 5.19+
 	LSM          bool   // filesystem, exec, sbom
 	LSMWhy       string // why not
 }
@@ -89,24 +89,37 @@ func (m Modes) allows(a Action) bool {
 	return m.Log
 }
 
-// Net: logging uses kprobes; deny and ask, the cgroup hooks; ask, seccomp.
+// canAsk: ask pauses the call with seccomp and freezes the command while
+// the question is up. Asking without freezing isn't offered.
+func (c Caps) canAsk() (bool, string) {
+	switch {
+	case !c.SeccompNotif:
+		return false, "no seccomp user notifications"
+	case !c.Freeze:
+		return false, "ask needs cgroup v2 and Linux 5.19+ to freeze the command"
+	}
+	return true, ""
+}
+
+// Net: logging uses kprobes; deny, the cgroup hooks; ask, also canAsk.
 func (c Caps) Net() Modes {
 	if !c.BTF {
 		return Modes{Why: "no kernel BTF (/sys/kernel/btf/vmlinux)"}
 	}
-	m := Modes{Log: c.Kprobes, Deny: c.CgroupV2, Ask: c.CgroupV2 && c.SeccompNotif}
+	ask, askWhy := c.canAsk()
+	m := Modes{Log: c.Kprobes, Deny: c.CgroupV2, Ask: c.CgroupV2 && ask}
 	switch {
 	case !c.Kprobes:
 		m.Why = "no kprobes"
 	case !c.CgroupV2:
 		m.Why = "no cgroup v2 at " + cgroupRoot
-	case !c.SeccompNotif:
-		m.Why = "no seccomp user notifications"
+	default:
+		m.Why = askWhy
 	}
 	return m
 }
 
-// Files (and Exec): the BPF LSM; ask also needs seccomp.
+// Files (and Exec): the BPF LSM; ask also canAsk.
 func (c Caps) Files() Modes {
 	switch {
 	case !c.BTF:
@@ -114,11 +127,8 @@ func (c Caps) Files() Modes {
 	case !c.LSM:
 		return Modes{Why: c.LSMWhy}
 	}
-	m := Modes{Log: true, Deny: true, Ask: c.SeccompNotif}
-	if !m.Ask {
-		m.Why = "no seccomp user notifications"
-	}
-	return m
+	ask, askWhy := c.canAsk()
+	return Modes{Log: true, Deny: true, Ask: ask, Why: askWhy}
 }
 
 // Check refuses what o asks for and this kernel can't do, saying why.

@@ -241,12 +241,7 @@ type ttyAsker struct {
 	br   *bufio.Reader
 	err  error
 
-	// needFreeze: without AskRequest.Freeze, don't touch the terminal and
-	// leave the question to the web page and attach. secwrap shell sets it:
-	// taking the terminal from a shell reading its prompt, unfrozen, could
-	// hand it the answer, or make its next read fail and the shell exit.
-	needFreeze bool
-	warnOnce   sync.Once
+	warnOnce sync.Once
 }
 
 func newTTYAsker() *ttyAsker { return &ttyAsker{sem: make(chan struct{}, 1)} }
@@ -330,9 +325,12 @@ func (t *ttyAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.AskAns
 		<-ctx.Done()
 		return deny
 	}
-	if t.needFreeze && r.Freeze == nil {
+	// Never ask unfrozen: the command could read the answer, or print over
+	// the question. secwrap cap checks the kernel can freeze; this is for
+	// when its cgroup still couldn't be set up.
+	if r.Freeze == nil {
 		t.warnOnce.Do(func() {
-			fmt.Fprintln(os.Stderr, "secwrap: inline questions need Linux 5.19+ and cgroup v2 here; answer on the web page or with secwrap session attach")
+			fmt.Fprintln(os.Stderr, "secwrap: can't freeze the command for inline questions; answer on the web page or with secwrap session attach")
 		})
 		<-ctx.Done()
 		return deny

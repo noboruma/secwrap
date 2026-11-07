@@ -53,12 +53,11 @@ Started as root, `sudo secwrap …` included, `secwrap` takes it that you want t
 
 ```
 $ secwrap cap
-Linux 6.12.1 (armv7l)
-  network     log ask deny
+Linux 5.15.0 (armv7l)
+  network     log deny      (ask needs cgroup v2 and Linux 5.19+ to freeze the command)
   filesystem  unavailable   (armv7l kernels can't run BPF LSM programs)
   exec        unavailable   (armv7l kernels can't run BPF LSM programs)
   sbom        unavailable   (armv7l kernels can't run BPF LSM programs)
-  pause       no            (inline questions can't freeze the command: needs cgroup v2 and Linux 5.19+)
 ```
 
 Every session runs the same check at startup and refuses what the kernel can't do, saying why.
@@ -67,8 +66,8 @@ Every session runs the same check at startup and refuses what the kernel can't d
 - **Root access through `sudo`** (or running as root). `secwrap` asks for your password once, at startup. It then
   keeps root for itself until the session ends, because the eBPF programs stop when it exits. The command you
   monitor runs as you (see [Running as root](#running-as-root)).
-- Asking with the process paused (the shell and the inline prompt): Linux 5.19+ with cgroup v2. On older kernels,
-  `monitor` still asks without pausing, while `shell` only takes answers from the web page or `secwrap session`.
+- `ask` (and so `secwrap shell`): Linux 5.19+ with cgroup v2, to freeze the command while a question is up. Older
+  kernels can only log and deny.
 - The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
   default on Debian 13). Otherwise add it to the kernel command line, e.g. `lsm=...,bpf`.
 - BPF LSM programs also need a 64-bit kernel whose BPF JIT has trampolines: x86_64, arm64, riscv64, s390x,
@@ -166,7 +165,7 @@ Every question can be answered in three places at once; the first answer wins:
 
 | Where | | Turn off with |
 | --- | --- | --- |
-| Inline | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way (Linux 5.19+ with cgroup v2). | `--no-inline` |
+| Inline | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way. | `--no-inline` |
 | Web page | `http://127.0.0.1:9000` by default; `--web-addr ADDR` changes the address. | `--no-web` |
 | `secwrap session` | In another terminal: `secwrap session attach`, or the terminal UI. | Always on |
 
