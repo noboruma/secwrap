@@ -171,9 +171,11 @@ func resolveLib(soname string, rpaths []string, from *elf.File) string {
 			return p
 		}
 	}
-	for _, d := range []string{"/lib64", "/usr/lib64", "/lib", "/usr/lib",
-		"/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu",
-		"/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu"} {
+	dirs := []string{"/lib64", "/usr/lib64", "/lib32", "/usr/lib32", "/lib", "/usr/lib"}
+	for _, triplet := range multiarchTriplets { // try only returns a compatible ELF
+		dirs = append(dirs, "/lib/"+triplet, "/usr/lib/"+triplet)
+	}
+	for _, d := range dirs {
 		if p := try(d); p != "" {
 			return p
 		}
@@ -229,4 +231,12 @@ func ldCache() map[string][]string {
 		}
 	})
 	return ldCacheMap
+}
+
+// multiarchTriplets are Debian's library directories under /lib and /usr/lib.
+var multiarchTriplets = []string{
+	"x86_64-linux-gnu", "i386-linux-gnu", "aarch64-linux-gnu",
+	"arm-linux-gnueabihf", "arm-linux-gnueabi",
+	"mips-linux-gnu", "mipsel-linux-gnu", "mips64el-linux-gnuabi64", "mips64-linux-gnuabi64",
+	"riscv64-linux-gnu", "powerpc64le-linux-gnu", "s390x-linux-gnu", "loongarch64-linux-gnu",
 }

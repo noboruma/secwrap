@@ -35,6 +35,42 @@ static __always_inline bool should_trace(u32 tgid)
 }
 
 /* ------------------------------------------------------------------------
+ * Architecture: the object is built once per byte order, not per CPU.
+ * Userspace reads the running kernel's BTF and sets where the first
+ * function arguments and the return value sit in struct pt_regs, and the
+ * kernel's word size (4 on 32-bit kernels, whose pointers and longs are 32
+ * bits while BPF's are 64).
+ * ------------------------------------------------------------------------ */
+
+const volatile u32 kword = 8;
+const volatile u32 regs_arg[3] = {};
+const volatile u32 regs_rc = 0;
+
+/* A kernel long or pointer at p. */
+static __always_inline u64 read_kword(const void *p)
+{
+	if (kword == 4) {
+		u32 v = 0;
+		bpf_probe_read_kernel(&v, sizeof(v), p);
+		return v;
+	}
+	u64 v = 0;
+	bpf_probe_read_kernel(&v, sizeof(v), p);
+	return v;
+}
+
+/* Argument i (0-2) of the probed kernel function, and its return value. */
+static __always_inline u64 kprobe_arg(struct pt_regs *ctx, int i)
+{
+	return read_kword((const char *)ctx + (regs_arg[i] & 511));
+}
+
+static __always_inline u64 kprobe_ret(struct pt_regs *ctx)
+{
+	return read_kword((const char *)ctx + (regs_rc & 511));
+}
+
+/* ------------------------------------------------------------------------
  * Paths and rules (filemon, execmon)
  * ------------------------------------------------------------------------ */
 

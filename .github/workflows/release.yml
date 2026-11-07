@@ -1,6 +1,7 @@
-# Builds secwrap for Linux amd64 and attaches the binary (and its SHA-256
-# checksum) to a GitHub release when it is published. The eBPF objects are
-# generated for x86 only (internal/monitor/secwrap_x86_bpfel.*, committed).
+# Builds secwrap for every Linux architecture in the Makefile's ARCHES and
+# attaches the binaries (and their SHA-256 checksums) to a GitHub release
+# when it is published. The eBPF objects are generated once per byte order
+# (internal/monitor/secwrap_bpfel.* and secwrap_bpfeb.*, committed).
 name: release
 
 on:
@@ -24,15 +25,15 @@ jobs:
         run: go test ./...
 
       - name: Build
-        env:
-          CGO_ENABLED: "0" # static binary, runs on any Linux distribution
-          GOOS: linux
-          GOARCH: amd64
         run: |
-          name="secwrap-linux-amd64"
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" -o "dist/${name}" ./cmd/secwrap
-          (cd dist && sha256sum "${name}" > "${name}.sha256")
+          for a in amd64 386 arm64 arm mips mipsle mips64 mips64le riscv64 ppc64le s390x loong64; do
+            name="secwrap-linux-${a}"
+            # static binaries, run on any Linux distribution; mips without an FPU
+            CGO_ENABLED=0 GOOS=linux GOARCH="$a" GOMIPS=softfloat GOMIPS64=softfloat \
+              go build -trimpath -ldflags "-s -w" -o "dist/${name}" ./cmd/secwrap
+            (cd dist && sha256sum "${name}" > "${name}.sha256")
+          done
 
       - name: Upload to release
         env:

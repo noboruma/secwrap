@@ -51,10 +51,21 @@ type seccompNotifResp struct {
 // Helper side: runs in the child, between fork and exec of the target.
 
 var (
-	netSyscalls  = []uint32{unix.SYS_CONNECT, unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG}
-	fileSyscalls = []uint32{unix.SYS_OPEN, unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_CREAT}
-	execSyscalls = []uint32{unix.SYS_EXECVE, unix.SYS_EXECVEAT}
+	netSyscalls  = syscalls(unix.SYS_CONNECT, unix.SYS_SENDTO, unix.SYS_SENDMSG, unix.SYS_SENDMMSG, sysSocketcall)
+	fileSyscalls = syscalls(sysOpen, unix.SYS_OPENAT, unix.SYS_OPENAT2, sysCreat)
+	execSyscalls = syscalls(unix.SYS_EXECVE, unix.SYS_EXECVEAT)
 )
+
+// syscalls leaves out those this architecture doesn't have.
+func syscalls(nrs ...int) []uint32 {
+	var out []uint32
+	for _, nr := range nrs {
+		if nr != noSyscall {
+			out = append(out, uint32(nr))
+		}
+	}
+	return out
+}
 
 // RunAskHelper installs the seccomp filter, hands the listener fd to the
 // parent (fd 3 is a socketpair to it), waits for the ack, then execs the
@@ -130,8 +141,8 @@ const seccompWaitKillableRecv = 1 << 5
 const killableBit = 1 << 31
 
 // installNotifyFilter makes the syscalls in nrs return SECCOMP_RET_USER_NOTIF
-// and allows everything else. Other architectures (x32 numbers, i386 via
-// int 0x80) are allowed: the BPF cgroup/LSM hooks still refuse them.
+// and allows everything else. Other ABIs (x32 numbers, i386 via int 0x80,
+// arm on arm64) are allowed: the BPF cgroup/LSM hooks still refuse them.
 // killable reports whether the kernel took seccompWaitKillableRecv.
 func installNotifyFilter(nrs []uint32) (fd int, killable bool, err error) {
 	const (
@@ -139,11 +150,15 @@ func installNotifyFilter(nrs []uint32) (fd int, killable bool, err error) {
 		jeq   = unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K
 		ret   = unix.BPF_RET | unix.BPF_K
 	)
+	arch, ok := auditArch()
+	if !ok {
+		return -1, false, fmt.Errorf("ask mode is not supported on %s", runtime.GOARCH)
+	}
 	k := uint8(len(nrs))
-	// 0 ld arch | 1 jeq x86_64 | 2 ld nr | 3.. jeq nr_i | 3+k allow | 4+k notify
+	// 0 ld arch | 1 jeq arch | 2 ld nr | 3.. jeq nr_i | 3+k allow | 4+k notify
 	filter := []unix.SockFilter{
 		{Code: ldAbs, K: 4}, // seccomp_data.arch
-		{Code: jeq, K: unix.AUDIT_ARCH_X86_64, Jt: 0, Jf: k + 1},
+		{Code: jeq, K: arch, Jt: 0, Jf: k + 1},
 		{Code: ldAbs, K: 0}, // seccomp_data.nr
 	}
 	for i, nr := range nrs {

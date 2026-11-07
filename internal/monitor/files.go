@@ -211,8 +211,27 @@ func (o *fileObjects) presetDirs(rules []FolderRule) (map[string]uint8, error) {
 	return out, nil
 }
 
-// BPFLSMEnabled reports whether the BPF LSM is active on this kernel.
+// BPFLSMEnabled reports whether the BPF LSM is active on this kernel and
+// can run on its architecture.
 func BPFLSMEnabled() bool {
+	return lsmArchSupported() && bpfInLSMList()
+}
+
+// lsmArchSupported: BPF LSM programs attach through BPF trampolines, which
+// only some architectures' JITs implement (not 32-bit x86, arm or mips).
+func lsmArchSupported() bool {
+	m, err := unameMachine()
+	if err != nil {
+		return false
+	}
+	switch m {
+	case "x86_64", "aarch64", "arm64", "riscv64", "s390x", "loongarch64", "ppc64", "ppc64le":
+		return true
+	}
+	return false
+}
+
+func bpfInLSMList() bool {
 	b, err := os.ReadFile("/sys/kernel/security/lsm")
 	if err != nil {
 		return false
@@ -237,7 +256,11 @@ type lsmConfig struct {
 // setupLSM loads the shared maps, then each LSM program on its own, so a
 // program this kernel rejects does not take the others down.
 func setupLSM(spec *ebpf.CollectionSpec, tracked *ebpf.Map, scope *fileScope, c lsmConfig, cleanup *closers) (*fileObjects, error) {
-	if !BPFLSMEnabled() {
+	if !lsmArchSupported() {
+		m, _ := unameMachine()
+		return nil, fmt.Errorf("--filesystem, --exec and --sbom need BPF LSM programs, which %s kernels can't run (no BPF trampolines); only --net works here", m)
+	}
+	if !bpfInLSMList() {
 		return nil, errors.New(`--filesystem, --exec and --sbom need the BPF LSM: "bpf" is not in /sys/kernel/security/lsm (add lsm=...,bpf to the kernel command line)`)
 	}
 	var (

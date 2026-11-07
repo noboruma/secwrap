@@ -19,22 +19,35 @@ For each one, you can **log** it, **ask** before allowing it, or **deny** it:
 go install github.com/noboruma/secwrap/cmd/secwrap@latest
 ```
 
-or download a binary from the [releases](https://github.com/noboruma/secwrap/releases/latest):
+or download a static binary from the [releases](https://github.com/noboruma/secwrap/releases/latest), built for
+`amd64`, `386`, `arm64`, `arm`, `mips`, `mipsle`, `mips64`, `mips64le`, `riscv64`, `ppc64le`, `s390x` and `loong64`:
 
 ```sh
-curl -fsSL -o secwrap "https://github.com/noboruma/secwrap/releases/latest/download/secwrap-linux-amd64"
+arch=arm64   # or amd64, 386, arm, mips, mipsle, ...
+curl -fsSL -o secwrap "https://github.com/noboruma/secwrap/releases/latest/download/secwrap-linux-$arch"
 chmod +x secwrap
 ```
 
+`make dist` builds them all into `dist/`.
+
 ### Requirements
 
-- Root, Linux 5.10+, amd64.
+- Root, Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), on any architecture listed above.
 - Asking with the process paused (the shell and the inline prompt): Linux 5.19+ with cgroup v2. On older kernels,
   `monitor` still asks without pausing, while `shell` only takes answers from the web page or `secwrap session`.
 - The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
   default on Debian 13). Otherwise add it to the kernel command line, e.g. `lsm=...,bpf`.
+- BPF LSM programs also need a 64-bit kernel whose BPF JIT has trampolines: x86_64, arm64, riscv64, s390x,
+  loongarch64 or ppc64. **32-bit x86, arm and mips kernels (and mips64) can only monitor the network.**
 
-Without the BPF LSM:
+| Architecture | `--net` | `--filesystem`, `--exec`, `--sbom` |
+| --- | --- | --- |
+| amd64, arm64, riscv64, s390x, loong64, ppc64le | Yes | Yes, with the BPF LSM |
+| 386, arm, mips, mipsle, mips64, mips64le | Yes | No |
+
+A 32-bit `secwrap` can run on a 64-bit kernel (e.g. `arm` on an arm64 kernel). What it can do depends on the kernel.
+
+Without the BPF LSM, or on a kernel that can't run it:
 
 | Feature | Without the BPF LSM |
 | --- | --- |
@@ -168,10 +181,11 @@ Run `secwrap --help` to see all options.
 The rules are enforced in the kernel by eBPF programs, so io_uring, static binaries and raw syscalls are covered too.
 In `ask` mode, seccomp pauses the call until you answer, and your answer is stored in a map the eBPF programs check.
 
+The eBPF code is built once per byte order (`bpfel`, `bpfeb`), not per CPU. Kernel structures are relocated at load
+time (CO-RE), and at startup `secwrap` reads where the kprobe arguments sit in `struct pt_regs` from the kernel's BTF.
+
 | File | Watches | Hooks |
 | --- | --- | --- |
 | [`netmon.bpf.c`](internal/monitor/netmon.bpf.c) | Network | `kprobe/tcp_connect`, `kretprobe/inet_csk_accept`, `kprobe/udp_sendmsg`, `kprobe/udpv6_sendmsg`; blocking with `cgroup/connect4/6`, `cgroup/sendmsg4/6`, `cgroup_skb/egress/ingress` |
 | [`filemon.bpf.c`](internal/monitor/filemon.bpf.c) | Files | `lsm/file_open` |
 | [`execmon.bpf.c`](internal/monitor/execmon.bpf.c) | Execution | `lsm/bprm_creds_for_exec` |
-| [`common.bpf.h`](internal/monitor/common.bpf.h) | Shared | The tracked process tree, and the file and folder rules used by `filemon` and `execmon` |
-| [`secwrap.bpf.c`](internal/monitor/secwrap.bpf.c) | Process tree | `tp_btf/sched_process_fork`, `sched_process_exit`; includes the three monitors, built as one eBPF object so they share maps |

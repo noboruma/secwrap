@@ -235,10 +235,10 @@ func (s *supervisor) taskContext(id uint64) (context.Context, context.CancelFunc
 }
 
 func (s *supervisor) handle(req *seccompNotif) seccompNotifResp {
-	switch int(req.Data.Nr) {
-	case unix.SYS_OPEN, unix.SYS_OPENAT, unix.SYS_OPENAT2, unix.SYS_CREAT:
+	switch nr := int(req.Data.Nr); {
+	case nr == sysOpen || nr == sysCreat || nr == unix.SYS_OPENAT || nr == unix.SYS_OPENAT2:
 		return s.handleOpen(req)
-	case unix.SYS_EXECVE, unix.SYS_EXECVEAT:
+	case nr == unix.SYS_EXECVE || nr == unix.SYS_EXECVEAT:
 		return s.handleExec(req)
 	}
 	return s.handleNet(req)
@@ -251,7 +251,14 @@ func (s *supervisor) handleNet(req *seccompNotif) seccompNotifResp {
 
 	var kind string
 	var peers []netip.AddrPort
-	switch int(req.Data.Nr) {
+	nr := int(req.Data.Nr)
+	if nr == sysSocketcall { // socketcall(call, unsigned long args[])
+		var ok bool
+		if nr, a, ok = socketcallArgs(tid, a); !ok {
+			return cont
+		}
+	}
+	switch nr {
 	case unix.SYS_CONNECT: // connect(fd, addr, len)
 		kind = "connect"
 		peers = appendPeer(peers, tid, a[1], a[2])
@@ -263,7 +270,7 @@ func (s *supervisor) handleNet(req *seccompNotif) seccompNotifResp {
 		peers = appendMsgPeer(peers, tid, a[1])
 	case unix.SYS_SENDMMSG: // sendmmsg(fd, mmsghdr*, vlen, flags)
 		kind = "send"
-		const mmsghdrSize = 64 // struct msghdr (56) + msg_len + padding
+		mmsghdrSize := 8 * ptrSize // struct msghdr (7 words) + msg_len, padded
 		for i := uint64(0); i < min(a[2], 64); i++ {
 			peers = appendMsgPeer(peers, tid, a[1]+i*mmsghdrSize)
 		}
@@ -416,14 +423,15 @@ func (s *supervisor) handleOpen(req *seccompNotif) seccompNotifResp {
 
 	dirfd := int32(unix.AT_FDCWD)
 	var pathPtr, flags uint64
-	switch int(req.Data.Nr) {
-	case unix.SYS_OPEN: // open(path, flags, mode)
+	// open and creat are noSyscall on some architectures, hence no switch.
+	switch nr := int(req.Data.Nr); {
+	case nr == sysOpen: // open(path, flags, mode)
 		pathPtr, flags = a[0], a[1]
-	case unix.SYS_CREAT: // creat(path, mode)
+	case nr == sysCreat: // creat(path, mode)
 		pathPtr, flags = a[0], unix.O_CREAT|unix.O_WRONLY|unix.O_TRUNC
-	case unix.SYS_OPENAT: // openat(dirfd, path, flags, mode)
+	case nr == unix.SYS_OPENAT: // openat(dirfd, path, flags, mode)
 		dirfd, pathPtr, flags = int32(a[0]), a[1], a[2]
-	case unix.SYS_OPENAT2: // openat2(dirfd, path, struct open_how *, size)
+	case nr == unix.SYS_OPENAT2: // openat2(dirfd, path, struct open_how *, size)
 		var how [8]byte // __u64 flags is the first field
 		if a[3] < 8 || !readMem(tid, a[2], how[:]) {
 			return cont

@@ -26,12 +26,8 @@ import (
 func readArgv(tid int, ptr uint64) []string {
 	var args []string
 	for i := uint64(0); ptr != 0 && i < 32; i++ {
-		var p [8]byte
-		if !readMem(tid, ptr+i*8, p[:]) {
-			break
-		}
-		a := binary.NativeEndian.Uint64(p[:])
-		if a == 0 {
+		a, ok := readPtr(tid, ptr+i*ptrSize)
+		if !ok || a == 0 {
 			break
 		}
 		s, ok := readCString(tid, a, 256)
@@ -175,15 +171,47 @@ func appendPeer(out []netip.AddrPort, tid int, ptr, n uint64) []netip.AddrPort {
 
 // appendMsgPeer reads msg_name/msg_namelen from a struct msghdr.
 func appendMsgPeer(out []netip.AddrPort, tid int, msghdr uint64) []netip.AddrPort {
-	var h [12]byte // void *msg_name; socklen_t msg_namelen
-	if msghdr == 0 || !readMem(tid, msghdr, h[:]) {
+	if msghdr == 0 {
 		return out
 	}
-	return appendPeer(out, tid, binary.NativeEndian.Uint64(h[0:8]), uint64(binary.NativeEndian.Uint32(h[8:12])))
+	name, ok := readPtr(tid, msghdr) // void *msg_name
+	var namelen [4]byte              // socklen_t msg_namelen
+	if !ok || !readMem(tid, msghdr+ptrSize, namelen[:]) {
+		return out
+	}
+	return appendPeer(out, tid, name, uint64(binary.NativeEndian.Uint32(namelen[:])))
+}
+
+// socketcallArgs turns socketcall(call, args) into the socket syscall it
+// stands for and that syscall's arguments.
+func socketcallArgs(tid int, a [6]uint64) (int, [6]uint64, bool) {
+	var nr, n int
+	switch a[0] { // SYS_* in linux/net.h
+	case 3: // SYS_CONNECT
+		nr, n = unix.SYS_CONNECT, 3
+	case 11: // SYS_SENDTO
+		nr, n = unix.SYS_SENDTO, 6
+	case 16: // SYS_SENDMSG
+		nr, n = unix.SYS_SENDMSG, 3
+	case 20: // SYS_SENDMMSG
+		nr, n = unix.SYS_SENDMMSG, 4
+	default:
+		return 0, a, false
+	}
+	var args [6]uint64
+	for i := range n {
+		v, ok := readPtr(tid, a[1]+uint64(i)*ptrSize)
+		if !ok {
+			return 0, a, false
+		}
+		args[i] = v
+	}
+	return nr, args, true
 }
 
 func readMem(tid int, addr uint64, b []byte) bool {
-	local := []unix.Iovec{{Base: &b[0], Len: uint64(len(b))}}
+	local := []unix.Iovec{{Base: &b[0]}}
+	local[0].SetLen(len(b))
 	remote := []unix.RemoteIovec{{Base: uintptr(addr), Len: len(b)}}
 	n, err := unix.ProcessVMReadv(tid, local, remote, 0)
 	return err == nil && n == len(b)

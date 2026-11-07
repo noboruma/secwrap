@@ -358,6 +358,9 @@ func loadTrace(opts Options, blockNet bool, cleanup *closers) (*ebpf.CollectionS
 	if err := spec.Variables["trace_all"].Set(boolByte(opts.All)); err != nil {
 		return nil, nil, err
 	}
+	if err := setKernelRegs(spec); err != nil {
+		return nil, nil, err
+	}
 	if blockNet {
 		if err := probeDenyHelpers(spec); err != nil {
 			return nil, nil, fmt.Errorf("probe helpers: %w", err)

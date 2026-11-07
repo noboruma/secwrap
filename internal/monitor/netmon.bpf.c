@@ -79,8 +79,9 @@ static __always_inline void fill_from_sock(struct event *e, struct sock *sk)
 
 /* Outbound TCP: called after route lookup and source port selection. */
 SEC("kprobe/tcp_connect")
-int BPF_KPROBE(kp_tcp_connect, struct sock *sk)
+int kp_tcp_connect(struct pt_regs *ctx)
 {
+	struct sock *sk = (struct sock *)kprobe_arg(ctx, 0);
 	struct event *e = new_event(EV_CONNECT, PROTO_TCP);
 	if (!e)
 		return 0;
@@ -91,8 +92,9 @@ int BPF_KPROBE(kp_tcp_connect, struct sock *sk)
 
 /* Inbound TCP: the accepted socket. */
 SEC("kretprobe/inet_csk_accept")
-int BPF_KRETPROBE(krp_inet_csk_accept, struct sock *sk)
+int krp_inet_csk_accept(struct pt_regs *ctx)
 {
+	struct sock *sk = (struct sock *)kprobe_ret(ctx);
 	if (!sk)
 		return 0;
 	struct event *e = new_event(EV_ACCEPT, PROTO_TCP);
@@ -112,7 +114,7 @@ static __always_inline int udp_send(struct sock *sk, struct msghdr *msg, u16 fam
 
 	/* Unconnected sockets (sendto) carry the destination in msg_name,
 	 * which the kernel has already copied to kernel memory. */
-	void *name = BPF_CORE_READ(msg, msg_name);
+	void *name = (void *)read_kword(&msg->msg_name);
 	if (name) {
 		if (family == AF_INET) {
 			struct sockaddr_in sin = {};
@@ -138,15 +140,15 @@ static __always_inline int udp_send(struct sock *sk, struct msghdr *msg, u16 fam
 }
 
 SEC("kprobe/udp_sendmsg")
-int BPF_KPROBE(kp_udp_sendmsg, struct sock *sk, struct msghdr *msg)
+int kp_udp_sendmsg(struct pt_regs *ctx)
 {
-	return udp_send(sk, msg, AF_INET);
+	return udp_send((struct sock *)kprobe_arg(ctx, 0), (struct msghdr *)kprobe_arg(ctx, 1), AF_INET);
 }
 
 SEC("kprobe/udpv6_sendmsg")
-int BPF_KPROBE(kp_udpv6_sendmsg, struct sock *sk, struct msghdr *msg)
+int kp_udpv6_sendmsg(struct pt_regs *ctx)
 {
-	return udp_send(sk, msg, AF_INET6);
+	return udp_send((struct sock *)kprobe_arg(ctx, 0), (struct msghdr *)kprobe_arg(ctx, 1), AF_INET6);
 }
 
 /* ------------------------------------------------------------------------
