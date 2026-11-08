@@ -22,15 +22,12 @@ struct {
 	__type(value, u8);
 } tracked SEC(".maps");
 
-const volatile u8 trace_all = 0;
 const volatile u32 self_tgid = 0;
 
 static __always_inline bool should_trace(u32 tgid)
 {
 	if (tgid == self_tgid)
 		return false;
-	if (trace_all)
-		return true;
 	return bpf_map_lookup_elem(&tracked, &tgid) != NULL;
 }
 

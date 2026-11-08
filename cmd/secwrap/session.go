@@ -376,13 +376,6 @@ func (s *session) bareAsk() bool {
 	return false
 }
 
-// bareLog makes the categories without a mode log: for --all, where asking
-// is not possible. (Run then refuses an explicit ask.)
-func (s *session) bareLog() {
-	s.askOn = false
-	s.resolve()
-}
-
 // parse parses args into fs (see parseFlags), then checks --user.
 func (s *session) parse(fs *flag.FlagSet, args []string) {
 	parseFlags(fs, args)
@@ -535,13 +528,11 @@ func (s *session) announce() {
 	}
 }
 
-// sessionName names the session: the command, attach-PID or all.
+// sessionName names the session: the command or attach-PID.
 func sessionName(o monitor.Options) string {
 	switch {
 	case len(o.Command) > 0:
 		return filepath.Base(o.Command[0])
-	case o.All:
-		return "all"
 	case len(o.PIDs) > 0:
 		return "attach-" + strconv.Itoa(o.PIDs[0])
 	}

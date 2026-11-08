@@ -40,17 +40,9 @@ type history struct {
 func openHistory(base, id string) (*history, error) {
 	parentDir, rel := base, "."
 	if base == "" {
-		u := invoker()
-		home, err := os.UserHomeDir()
-		if u != nil {
-			home, err = u.HomeDir, nil
-		}
-		if err != nil {
+		var err error
+		if parentDir, rel, err = defaultHistory(); err != nil {
 			return nil, fmt.Errorf("--history: %w", err)
-		}
-		parentDir, rel = home, filepath.Join(".local", "state", "secwrap")
-		if x := os.Getenv("XDG_STATE_HOME"); x != "" && u == nil {
-			parentDir, rel = x, "secwrap"
 		}
 	} else {
 		abs, err := filepath.Abs(base)
@@ -94,6 +86,23 @@ func openHistory(base, id string) (*history, error) {
 	h.evW = bufio.NewWriterSize(h.evF, 64<<10)
 	h.enc = json.NewEncoder(h.evW)
 	return h, nil
+}
+
+// defaultHistory is where sessions are kept without --history: rel inside
+// parent, the invoker's home (or $XDG_STATE_HOME when not under sudo).
+func defaultHistory() (parent, rel string, err error) {
+	u := invoker()
+	home, err := os.UserHomeDir()
+	if u != nil {
+		home, err = u.HomeDir, nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if x := os.Getenv("XDG_STATE_HOME"); x != "" && u == nil {
+		return x, "secwrap", nil
+	}
+	return home, filepath.Join(".local", "state", "secwrap"), nil
 }
 
 // mkdirAllInvoker creates rel and its missing parents inside root, giving

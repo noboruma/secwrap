@@ -5,6 +5,8 @@ set -u
 SW=${1:?path to secwrap}
 export HOME=/run/secwrap-home # /root is not readable through the share
 mkdir -p "$HOME"
+# Sessions of our own, not the host's (seen read-only through the share).
+mkdir -p /var/lib/secwrap && mount -t tmpfs tmpfs /var/lib/secwrap
 D=$(mktemp -d -p /run) U=swtest-$$ PORT=18080
 ONLY="--fs=off --exec=off" # every category is asked about by default
 pass=0 fail=0 SWPID= LPID=
@@ -171,7 +173,7 @@ sleep 1
 
 echo "== launched command with --net=deny"
 OWN=$(cg $$)
-$SW monitor --net=deny $ONLY --no-web --log off -- bash -c \
+$SW --net=deny $ONLY --no-web --log off -- bash -c \
 	"sed -n 's/^0:://p' /proc/self/cgroup; exec 3<>/dev/tcp/127.0.0.1/$PORT && echo OK || echo BLOCKED" >$D/cmd.out 2>&1
 CMDCG=$(grep -m1 secwrap-deny $D/cmd.out)
 case "$CMDCG" in
@@ -183,7 +185,7 @@ grep -qx BLOCKED $D/cmd.out && ok "command's connect blocked" || bad "command ou
 echo "== launched command with ask: its freeze cgroup"
 # No exec and no network: nothing is asked, but the command still runs in
 # the cgroup that would be frozen during a question.
-timeout 30 $SW monitor --exec=ask --net=off --fs=off --no-web --log off -- /bin/bash -c 'read l < /proc/self/cgroup; echo "CG=${l#0::}"' >$D/ask.out 2>&1
+timeout 30 $SW --exec=ask --net=off --fs=off --no-web --log off -- /bin/bash -c 'read l < /proc/self/cgroup; echo "CG=${l#0::}"' >$D/ask.out 2>&1
 CMDCG=$(sed -n 's/^CG=//p' $D/ask.out)
 case "$CMDCG" in
 "$OWN"/secwrap-ask-*) ok "command ran in a child of secwrap's own cgroup" ;;
@@ -193,7 +195,7 @@ esac
 echo "== no flags: everything asked about"
 # A builtin-only command: no exec, no network, no sensitive read, so
 # nothing to ask; secwrap must still start with all three on.
-timeout 30 $SW monitor --no-web --log off -- /bin/bash -c 'read l < /proc/self/version; echo DONE' >$D/defaults.out 2>&1
+timeout 30 $SW --no-web --log off -- /bin/bash -c 'read l < /proc/self/version; echo DONE' >$D/defaults.out 2>&1
 rc=$?
 grep -q '^NETWORK: *ASK' $D/defaults.out && grep -q '^FILESYSTEM: *ASK' $D/defaults.out && grep -q '^EXEC: *ASK' $D/defaults.out &&
 	grep -qx DONE $D/defaults.out && [ $rc -eq 0 ] && ok "network, filesystem and exec all asked about" ||
@@ -202,16 +204,28 @@ grep -q '^NETWORK: *ASK' $D/defaults.out && grep -q '^FILESYSTEM: *ASK' $D/defau
 echo "== other modes run and clean up"
 for m in "--net=off --fs=log --exec=log" "--fs=deny --exec=deny --net=deny" \
 	"--net=log --fs=log --exec=log --sbom $D/sbom"; do
-	timeout 30 $SW monitor $m --no-web --log off -- /bin/sh -c 'ls / >/dev/null; cat /etc/hostname >/dev/null; true' >$D/mode.out 2>&1
+	timeout 30 $SW $m --no-web --log off -- /bin/sh -c 'ls / >/dev/null; cat /etc/hostname >/dev/null; true' >$D/mode.out 2>&1
 	rc=$?
 	if [ $rc -eq 0 ] && ! grep -qi 'panic\|goroutine' $D/mode.out; then
-		ok "monitor $m"
+		ok "secwrap $m"
 	else
-		bad "monitor $m: rc=$rc: $(tail -n3 $D/mode.out)"
+		bad "secwrap $m: rc=$rc: $(tail -n3 $D/mode.out)"
 	fi
 done
 left=$(find /sys/fs/cgroup -type d \( -name 'secwrap-deny-*' -o -name 'secwrap-ask-*' \) 2>/dev/null)
 [ -z "$left" ] && ok "no secwrap cgroups left" || bad "leftover cgroups: $left"
+
+echo "== vacuum"
+n=$(ls /var/lib/secwrap/sessions | wc -l)
+hist=$(ls -d $HOME/.local/state/secwrap/* 2>/dev/null | wc -l)
+$SW vacuum --older-than 1h >$D/vacuum.out 2>&1
+[ $n -gt 0 ] && [ "$(ls /var/lib/secwrap/sessions | wc -l)" -eq $n ] && ok "vacuum --older-than 1h keeps today's $n sessions" ||
+	bad "vacuum 1h: $(tail -n3 $D/vacuum.out)"
+$SW vacuum --older-than 0d >$D/vacuum.out 2>&1
+left=$(ls /var/lib/secwrap/sessions | wc -l)
+lefth=$(ls -d $HOME/.local/state/secwrap/* 2>/dev/null | wc -l)
+[ $hist -gt 0 ] && [ $left -eq 0 ] && [ $lefth -eq 0 ] && ok "vacuum --older-than 0d deletes $n records and $hist history folders" ||
+	bad "vacuum 0d: $left records, $lefth folders left: $(tail -n3 $D/vacuum.out)"
 
 if [ $fail -gt 0 ]; then
 	for f in $D/*.out; do echo "--- $f"; tail -n 20 $f; done

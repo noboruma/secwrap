@@ -114,7 +114,6 @@ const (
 	secwrapVarSensDir           = "sens_dir"
 	secwrapVarSensLen           = "sens_len"
 	secwrapVarSensPath          = "sens_path"
-	secwrapVarTraceAll          = "trace_all"
 	secwrapVarUnusedEvent       = "unused_event"
 	secwrapVarUnusedFileEvent   = "unused_file_event"
 )
@@ -210,7 +209,6 @@ type secwrapVariableSpecs struct {
 	SensDir         *ebpf.VariableSpec `ebpf:"sens_dir"`
 	SensLen         *ebpf.VariableSpec `ebpf:"sens_len"`
 	SensPath        *ebpf.VariableSpec `ebpf:"sens_path"`
-	TraceAll        *ebpf.VariableSpec `ebpf:"trace_all"`
 	UnusedEvent     *ebpf.VariableSpec `ebpf:"unused_event"`
 	UnusedFileEvent *ebpf.VariableSpec `ebpf:"unused_file_event"`
 }
@@ -277,7 +275,6 @@ type secwrapVariables struct {
 	SensDir         *ebpf.Variable `ebpf:"sens_dir"`
 	SensLen         *ebpf.Variable `ebpf:"sens_len"`
 	SensPath        *ebpf.Variable `ebpf:"sens_path"`
-	TraceAll        *ebpf.Variable `ebpf:"trace_all"`
 	UnusedEvent     *ebpf.Variable `ebpf:"unused_event"`
 	UnusedFileEvent *ebpf.Variable `ebpf:"unused_file_event"`
 }

@@ -658,7 +658,7 @@ func deleteSession(v sessionView) error {
 		return fmt.Errorf("%s: not a session folder", v.Dir)
 	}
 	if err := os.RemoveAll(v.Dir); err != nil {
-		if os.IsPermission(err) {
+		if os.IsPermission(err) && os.Geteuid() != 0 {
 			return errors.New("deleting needs root: run it with sudo")
 		}
 		return err

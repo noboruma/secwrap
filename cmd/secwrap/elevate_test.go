@@ -13,14 +13,17 @@ func TestNeedsRoot(t *testing.T) {
 		args []string
 		want bool
 	}{
-		{[]string{"monitor", "--net", "--", "curl", "-h"}, true}, // -h after -- is the command's
-		{[]string{"monitor", "-h"}, false},
+		{[]string{"--net", "--", "curl", "-h"}, true}, // -h after -- is the command's
+		{[]string{"--net", "-h"}, false},
+		{[]string{"--", "make"}, true},
 		{[]string{"shell"}, true},
 		{[]string{"attach", "--name", "nginx"}, true},
 		{[]string{"sessions", "attach"}, true},
 		{[]string{"sessions", "list"}, false},
 		{[]string{"sessions"}, false},
-		{[]string{"sbom", "/bin/ls"}, false},
+		{[]string{"cap"}, false},
+		{[]string{"vacuum"}, true},
+		{[]string{"vacuum", "-h"}, false},
 	} {
 		if got := needsRoot(c.args); got != c.want {
 			t.Errorf("needsRoot(%q) = %v, want %v", c.args, got, c.want)

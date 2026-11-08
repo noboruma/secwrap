@@ -36,4 +36,4 @@ vmtest: build
 	test/vm/run.sh $(BIN)
 
 clean:
-	rm -rf $(BIN) dist internal/monitor/secwrap_bpfe[lb].*
+	rm -rf $(BIN) dist

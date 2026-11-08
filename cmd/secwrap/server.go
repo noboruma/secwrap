@@ -827,7 +827,7 @@ func render(st tuiState, sel int, msg, confirm string) {
 	}
 	fmt.Fprintf(&b, "%s↑/↓ select · Enter attach · w on/off the web page (W: all) · d delete (dead) · q quit%s\n\n", ansiDim, ansiReset)
 	if len(st.list) == 0 {
-		fmt.Fprintf(&b, "  no sessions yet in %s: start one with sudo secwrap shell / monitor\n", sessionsDir())
+		fmt.Fprintf(&b, "  no sessions yet in %s: start one with secwrap -- CMD or secwrap shell\n", sessionsDir())
 	}
 	fmt.Fprintf(&b, "%s   %-6s %-28s %-6s %-10s %-4s %-24s %s%s\n", ansiDim, "STATE", "SESSION", "WAIT", "ASK", "WEB", "", "TARGET", ansiReset)
 	for i, v := range st.list {

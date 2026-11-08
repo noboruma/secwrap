@@ -1,9 +1,9 @@
 # `secwrap`
 
-Watch what a process does, and decide what it's allowed to do.
+Watch what a process does under the hood, and decide what it's allowed to do.
 
 `secwrap` runs a command (or a whole shell) under eBPF and covers three kinds of access by the process and its children.
-By default `secwrap` **asks** you before allowing each one; you can **log** or **deny** any of them instead:
+By default `secwrap` **asks** you before allowing each one you can **log** or **deny** any of them instead:
 
 | Access | Flag | What it covers | `log` | `ask` | `deny` |
 | --- | --- | --- | --- | --- | --- |
@@ -15,14 +15,13 @@ By default `secwrap` **asks** you before allowing each one; you can **log** or *
 
 ## Why
 
-Most of the damage a dependency or a script does happens in the open: it connects somewhere, reads a secret, or
-runs another program. `secwrap` puts those three moments under your control for any command — a one-line
-`npm install`, a `curl | sh`, a build step, or an AI coding agent running shell commands on your machine — without
-changing the command or trusting it.
+A malicious dependency or install script usually has to do one of three things to cause harm: connect somewhere,
+read a secret, or run another program. `secwrap` lets you see and approve each of those for a single command, such as
+`npm install`, `curl | sh`, a build step, or a coding agent running shell commands, without changing the command.
 
-- **Vet an install script** before it touches your keys: `secwrap monitor -- ./install.sh`
-- **Keep a coding agent on a leash**: approve every connection, write and exec it attempts.
-- **Record what a build really does**, then turn it into a JSON report or a CycloneDX SBOM for an audit.
+- Check an install script before it reads your keys: `secwrap -- ./install.sh`
+- Approve the connections, writes and programs a coding agent tries to use.
+- Record what a build does, as a JSON report or a CycloneDX SBOM.
 
 ## Install
 
@@ -40,13 +39,12 @@ curl -fsSL -o secwrap "https://github.com/noboruma/secwrap/releases/latest/downl
 chmod +x secwrap
 ```
 
-`uname -m` doesn't say whether a mips CPU is little-endian, so the second line checks that.
-
+or grab this repository and run:
 `make dist` builds them all into `dist/`.
 
 ### Running as root
 
-Run `secwrap` as yourself; that's the recommended way. It needs root only to load its eBPF programs into the kernel,
+Run `secwrap` as yourself - that's the recommended way. It needs root only to load its eBPF programs into the kernel,
 so it asks `sudo` for your password once and keeps root for itself. The command you give it isn't raised to root: it
 runs as you, with your groups and environment. For extra safety, `--user NAME` runs the command as another,
 less trusted user.
@@ -70,8 +68,7 @@ Linux 5.15.0 (armv7l)
 Every session runs the same check at startup and refuses what the kernel can't do, saying why.
 
 - Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), on any architecture listed above.
-- **Root access through `sudo`** (or running as root). `secwrap` asks for your password once, at startup. It then
-  keeps root until the session ends. The command you monitor runs as you (see [Running as root](#running-as-root)).
+- Root, through `sudo` or by running as root (see [Running as root](#running-as-root)).
 - `ask`, the default (and so `secwrap shell`): Linux 5.19+ with cgroup v2, to freeze the command while a question is
   up. Older kernels can only log and deny: give the mode (`--net log`), or `--log-only`.
 - The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
@@ -91,31 +88,30 @@ Without the BPF LSM, or on a kernel that can't run it:
 | Feature | Without the BPF LSM |
 | --- | --- |
 | `--net` (log, ask, deny) | Works: it uses cgroup and kprobe hooks, not the LSM |
-| `--fs`, `--exec` | Not watched by default, with a note saying why; refused at startup when given explicitly |
+| `--fs`, `--exec` | Not watched by default, with a note saying why. Refused at startup when given explicitly |
 | `--sbom` | Refused at startup, with the reason |
-| Binaries and SBOMs on the web page | Not collected; the page lists no binaries |
+| Binaries and SBOMs on the web page | Not collected. The page lists no binaries |
 
 ## Usage
 
-By default `secwrap` asks about all three: `secwrap monitor -- ./install.sh` stops at each new connection, each write
-or sensitive read, and each new program. Give a flag a mode (`log`, `deny` or `off`) to change that one; the others
+By default `secwrap` asks about all three: `secwrap -- ./install.sh` stops at each new connection, each write
+or sensitive read, and each new program. Give a flag a mode (`log`, `deny` or `off`) to change that one. The others
 keep asking:
 
 ```sh
-secwrap monitor -- ./install.sh                  # ask about connections, writes, sensitive reads and programs
-secwrap monitor --exec off -- ./install.sh       # the same, but let it run any program
-secwrap monitor --net log -- ./build.sh          # record connections, ask about the rest
-secwrap monitor --log-only -- make               # record everything, ask nothing
-secwrap monitor --deny-all -- ./untrusted        # no network, no writes or sensitive reads, no other programs
-secwrap monitor --net deny --fs off --exec off -- curl https://example.com  # only block the network
-secwrap shell                                    # an interactive shell that asks about network and files
+secwrap -- ./install.sh                  # ask about connections, writes, sensitive reads and programs
+secwrap --exec off -- ./install.sh       # the same, but let it run any program
+secwrap --net log -- ./build.sh          # record connections, ask about the rest
+secwrap --log-only -- make               # record everything, ask nothing
+secwrap --deny-all -- ./untrusted        # no network, no writes or sensitive reads, no other programs
+secwrap --net deny --fs off --exec off -- curl https://example.com  # only block the network
+secwrap shell                            # an interactive shell that asks about network and files
 ```
 
 `--log-only` and `--deny-all` change the default for every flag not given a mode. `secwrap shell` doesn't ask about
-programs unless you add `--exec`, since that would mean a question for each new command you type. `secwrap attach` and
-`secwrap monitor --all` have no launched command to ask about, so there the default is to log all three. In scripts
-and CI, where nobody is there to answer, use `--log-only` or give modes: a question nobody answers keeps the command
-waiting.
+programs unless you add `--exec`, since that would mean a question for each new command you type. `secwrap attach`
+logs all three by default (see [Attaching](#attaching-to-running-processes)). In scripts and CI, where nobody is there
+to answer, use `--log-only` or give modes: a question nobody answers keeps the command waiting.
 
 #### Which file reads are asked about
 
@@ -123,7 +119,7 @@ Files work differently from the network and programs. Any program reads hundreds
 locale data, configuration), so asking about or blocking every read would bury you in questions and break most
 programs. Instead, `ask` and `deny` cover:
 
-- **every write** (including creating or truncating a file), except in `/proc`, `/sys` and `/dev`;
+- **every write** (including creating or truncating a file), except in `/proc`, `/sys` and `/dev`
 - **reads of sensitive paths only**, where secrets usually live:
   - your home directory (SSH keys, tokens, browser profiles, `.env` files…)
   - `/root`
@@ -138,7 +134,7 @@ about or blocked: writes are covered everywhere already, sensitive or not. The l
 defaults included, so you can add up to 9. A folder covers everything inside it:
 
 ```sh
-secwrap monitor --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./install.sh
+secwrap --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./install.sh
 ```
 
 ### Answering
@@ -152,30 +148,28 @@ For each question, the process waits until you answer:
 ```
 
 If you deny an access, or don't answer, the call fails with `EPERM`. Press `f` to allow everything under that folder.
-For a connection, `a` allows that IP on any port and `d` refuses it from then on; `?` lists the answers.
+For a connection, `a` allows that IP on any port and `d` refuses it from then on. `?` lists the answers.
 You can also allow folders up front with `--allow`, for example `--allow rw:./build` or `--allow x:/usr/bin`.
 
-Every question can be answered in three places at once; the first answer wins:
+Every question can be answered in three places at once, the first answer wins:
 
 | Where | | Turn off with |
 | --- | --- | --- |
 | Inline | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way. | `--no-inline` |
-| Web page | `http://127.0.0.1:9000` by default; `--web-addr ADDR` changes the address. | `--no-web` |
+| Web page | `http://127.0.0.1:9000` by default. `--web-addr ADDR` changes the address. | `--no-web` |
 | `secwrap sessions` | In another terminal: `secwrap sessions attach`, or the terminal UI. | Always on |
 
 Without a terminal, inline questions step aside and wait for the web page or `secwrap sessions`.
 
-The web page lists every session; each session's page shows what is waiting and what was already answered. Every
+The web page (shown at the top) lists every session, with what is waiting and what was already answered. Every
 running `secwrap` serves it, and so does `secwrap sessions` while it is open (it asks `sudo` for that), so the page
-stays up after the sessions end:
-
-![A session's web page: a pending write to ~/.bashrc with Yes, No and Allow folder, above the answered questions](docs/web-session.png)
+stays up after the sessions end.
 
 ## As a login shell
 
 `secwrap` can replace a user's default shell through `chsh`, so everything they do (console, SSH, `su -`) is monitored
 from the first process. A login shell gets no flags and `secwrap` needs root, so use a wrapper that runs a root-owned
-script through sudo:
+script through `sudo`:
 
 `/usr/local/bin/secwrap-login`:
 
@@ -210,13 +204,13 @@ already running when you attach and the ones started later. Only what they do fr
 belongs to init) is no longer a child, so attach to it by its own PID. The session ends when every watched process has
 exited, or on Ctrl-C.
 
-`log` (the default here) and `deny` work on an attached process directly, through the kernel hooks. For `deny`, each process is moved into
-a `secwrap-deny-<pid>` cgroup created under the cgroup it was already in, so its container or systemd unit limits keep
-applying, and it is moved back when `secwrap` stops. Where no child cgroup can be created there, the `deny` cgroup is
-made at the root instead. If `secwrap` is killed outright (`kill -9`, a crash), the kernel drops the blocking with it
-and the processes get their network back, but they stay in that `secwrap-deny-<pid>` cgroup, which is left behind.
-Stopping the unit removes the leftover cgroup with it. To move the processes back by hand, write their PIDs to the
-parent cgroup's `cgroup.procs`.
+`log` (the default here) and `deny` work on an attached process directly, through the kernel hooks. For `deny`, each
+process is moved into a `secwrap-deny-<pid>` cgroup created under the cgroup it was already in, so its container or
+systemd unit limits keep applying, and it is moved back when `secwrap` stops. Where no child cgroup can be created
+there, the `deny` cgroup is made at the root instead. If `secwrap` is killed outright (`kill -9`, a crash), the kernel
+drops the blocking with it and the processes get their network back, but they stay in that `secwrap-deny-<pid>`
+cgroup, which is left behind. Stopping the unit removes the leftover cgroup with it. To move the processes back by
+hand, write their PIDs to the parent cgroup's `cgroup.procs`.
 
 `ask` is different. To pause a syscall until you answer, `secwrap` installs a seccomp filter, and the filter can only
 be installed from inside the process itself. For a command `secwrap` launches it does this before the command starts.
@@ -226,9 +220,6 @@ kernel only allows once the process has `NO_NEW_PRIVS` set. So ask-on-attach car
 > **The attached process can no longer gain privileges.** `NO_NEW_PRIVS` is permanent and inherited, so for the rest
 > of the life of that process and its children, `sudo` and setuid programs can't raise privileges. This is the one
 > place `secwrap` changes how the watched process behaves, so it is opt-in: pass `--allow-ask`.
-
-In practice this is rarely a problem — a process you attach to in order to watch it usually isn't about to run `sudo`
-— and for many it is a feature. It is still a real change, so `secwrap` never does it without `--allow-ask`.
 
 > [!NOTE]
 > Pausing a running process's syscalls is not wired up in this build: `--allow-ask` is accepted and validated, but
@@ -250,35 +241,35 @@ with one:
 
 - `-o report.json` writes a JSON report of every endpoint and path the process accessed.
 - `--log FILE` writes a live event log (JSON lines if the file name ends in `.jsonl`).
-- `secwrap attach PID` monitors processes that are already running.
-- `--sbom DIR` generates a CycloneDX SBOM for every binary the process runs.
 
 Run `secwrap --help` to see all options.
 
-## SBOM
+## Cleaning up
 
-`secwrap sbom BINARY` writes a CycloneDX 1.6 SBOM for one binary, **without root**: Go and Rust build info, the ELF
-shared libraries it links, and the Debian packages that own them, each with SHA-256/SHA-1 hashes and a PURL.
-`--sbom DIR` does the same for every binary a monitored process runs. Verified on Debian 13 (kernel 6.12, x86_64):
+Every session keeps its events, report, summary and SBOMs in a folder under `~/.local/state/secwrap` (`--history DIR`
+to choose another, `--history off` for none), and `secwrap sessions` lists its record until you delete it.
+`secwrap vacuum` deletes the records and folders of sessions that ended more than 30 days ago, and leaves running
+sessions alone:
 
 ```sh
-$ secwrap sbom /usr/bin/curl | jq '.components | length'
-28        # libcurl4t64, libssl3t64, libnghttp2-14, zlib1g, … resolved back to dpkg
-
-$ secwrap sbom ./secwrap | jq -r '.components[].purl'
-pkg:golang/stdlib@v1.27.3
-pkg:golang/github.com/cilium/ebpf@v0.22.0
-pkg:golang/golang.org/x/sys@v0.43.0
-pkg:deb/debian/libc6@2.41-12+deb13u4?arch=amd64&distro=debian-13
+secwrap vacuum                     # older than 30 days
+secwrap vacuum --older-than 7d     # or 12h, 90m
+secwrap vacuum --dry-run           # list what would go, delete nothing
 ```
 
-With `--sbom`, the session's web page lists every binary that ran, with its SBOM and a **VirusTotal** link that looks
-its SHA-256 up, a quick check that a program fetched and run by a script is known and clean. Only the hash leaves the
-machine, and only when you click, from your browser. The SBOM JSON can also be fed to grype, osv-scanner or
-Dependency-Track for known vulnerabilities.
+## SBOM
 
-`secwrap cap` reports what the running kernel supports; on the same box it prints `log ask deny` for all three of
-network, filesystem and exec, plus `sbom yes` and `pause yes`.
+`--sbom DIR` writes a CycloneDX 1.6 SBOM for every binary the command runs: Go and Rust build info, the ELF shared
+libraries it links, and the Debian packages that own them, each with SHA-256/SHA-1 hashes and a PURL. Bare `--sbom`
+puts them in the session's history folder. For `curl` on Debian 13 that is 28 components (libcurl4t64, libssl3t64,
+libnghttp2-14, zlib1g, ...), each resolved back to its dpkg package.
+
+The session's web page lists every binary that ran, with its SBOM and a **VirusTotal** link that looks its SHA-256 up,
+a quick check that a program fetched and run by a script is known and clean. Only the hash leaves the machine, and
+only when you click, from your browser. The SBOM JSON can also be fed to grype, osv-scanner or Dependency-Track for
+known vulnerabilities.
+
+![The binaries a session ran, each with its SBOM, JSON and VirusTotal links](.github/assets/binaries.png)
 
 ## Compared to other tools
 
@@ -289,34 +280,31 @@ Falco) watch whole hosts and clusters, not a single command.
 
 | Tool | Mechanism | Net | Files | Exec | Ask, live | Needs root | Attach / login shell |
 | --- | --- | :-: | :-: | :-: | --- | --- | --- |
-| **secwrap** | eBPF (kprobe, cgroup, BPF LSM) + seccomp | ✓ | ✓ | ✓ | terminal, web, 2nd terminal | yes (sudo) | both |
+| **secwrap** | eBPF (kprobe, cgroup, BPF LSM) + seccomp | ✓ | ✓ | ✓ | terminal, web, 2nd terminal | yes (`sudo`) | both |
 | [OpenSnitch](https://github.com/evilsocket/opensnitch) | eBPF / NFQUEUE | ✓ | — | — | system-wide popups | daemon | system-wide |
-| [mori](https://github.com/gmh5225/mori) | eBPF | ✓ | ✓ | — | — (static rules) | yes | launch only |
+| [mori](https://github.com/skanehira/mori) | eBPF | ✓ | ✓ | — | — (static rules) | yes | launch only |
 | [sandlock](https://github.com/multikernel/sandlock) | Landlock + seccomp-notify | ✓ | ✓ | ✓ | callback, no file paths | **no** | launch only |
 | Firejail / bubblewrap | namespaces + seccomp | ~ | ✓ | ~ | — | setuid / userns | launch only |
 | Tetragon / Falco | eBPF | ✓ | ✓ | ✓ | — (policy, alerts) | yes | system-wide |
 
 ### secwrap and sandlock
 
-[sandlock](https://github.com/multikernel/sandlock) is the closest tool: log/ask/deny over network, files and exec
-for one command. It needs no root, because it uses Landlock and seccomp user notification. `secwrap` needs root to
-load its eBPF programs. Most of the differences follow from that.
+[sandlock](https://github.com/multikernel/sandlock) is the closest tool: it confines one command's network, files and
+exec, and a policy callback can allow, deny or audit calls as they happen. It needs no root, because it uses Landlock
+and seccomp user notification. `secwrap` needs root to load its eBPF programs. Most of the differences follow from
+that.
 
 **Where `secwrap` is different**
 
 - **Commands that really need root.** Installers like `./install.sh` often have to write to `/usr` or `/etc`.
-  `sudo secwrap monitor -- ./install.sh` runs the script as root and still stops at each write:
+  `sudo secwrap -- ./install.sh` runs the script as root and still stops at each write:
   *allow WRITE /etc/systemd/system/foo.service?* Run as yourself, a script that calls `sudo` partway through gets
   root too and stays watched, in every mode: the kernel hooks follow the process tree, not the user. sandlock always
-  sets `NO_NEW_PRIVS`, so nothing inside it can gain root. When it is started as root it doesn't drop capabilities,
-  and its file grants are fixed before the command starts.
+  sets `NO_NEW_PRIVS`, so nothing inside it can gain root.
 - **Real paths, for auditing and live decisions.** Each event records the path, process, PID and UID.
   `-o report.json` summarises what was accessed, `--log events.jsonl` streams events live, and `--sbom DIR`
   inventories every binary that ran. sandlock deliberately keeps path strings out of its callbacks, to stay safe from
-  TOCTOU races, so its file prompts and policy events can't say which file is being opened.
-- **io_uring.** `secwrap`'s hooks run on the kernel operation (`lsm/file_open`, `cgroup/connect4`), so opens and
-  connects issued through io_uring are still enforced, though they don't trigger a prompt. sandlock blocks io_uring
-  completely.
+  TOCTOU races, so its callback can't tell which file is being opened.
 - **Attach and login shell.** `secwrap` can attach to running processes or act as a login shell. sandlock only
   launches new sandboxes.
 
@@ -337,7 +325,7 @@ In `ask` mode, seccomp pauses the call until you answer, and your answer is stor
 
 | File | Watches | Hooks |
 | --- | --- | --- |
-| [`netmon.bpf.c`](internal/monitor/netmon.bpf.c) | Network | `kprobe/tcp_connect`, `kretprobe/inet_csk_accept`, `kprobe/udp_sendmsg`, `kprobe/udpv6_sendmsg`; blocking with `cgroup/connect4/6`, `cgroup/sendmsg4/6`, `cgroup_skb/egress/ingress` |
+| [`netmon.bpf.c`](internal/monitor/netmon.bpf.c) | Network | `kprobe/tcp_connect`, `kretprobe/inet_csk_accept`, `kprobe/udp_sendmsg`, `kprobe/udpv6_sendmsg`, blocking with `cgroup/connect4/6`, `cgroup/sendmsg4/6`, `cgroup_skb/egress/ingress` |
 | [`filemon.bpf.c`](internal/monitor/filemon.bpf.c) | Files | `lsm/file_open` |
 | [`execmon.bpf.c`](internal/monitor/execmon.bpf.c) | Execution | `lsm/bprm_creds_for_exec` |
 

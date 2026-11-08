@@ -19,9 +19,6 @@ func TestValidateAllowAsk(t *testing.T) {
 		{"attach ask with allow-ask", Options{
 			PIDs: []int{1}, Files: true, FilesAction: ActionAsk, Ask: ask, AllowAsk: true,
 		}, ""},
-		{"ask with --all", Options{
-			All: true, Files: true, FilesAction: ActionAsk, Ask: ask,
-		}, "--all"},
 		{"allow-ask without attach", Options{
 			Command: []string{"true"}, Files: true, FilesAction: ActionAsk, Ask: ask, AllowAsk: true,
 		}, "only applies when attaching"},
