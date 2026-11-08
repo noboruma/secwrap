@@ -1,0 +1,37 @@
+#!/bin/busybox sh
+# PID 1 of the vmtest initramfs (see run.sh): mounts the host's / read-only
+# under a tmpfs overlay, adds the test share at /share and hands over to
+# systemd, which runs the tests and powers off.
+/bin/busybox --install -s /bin
+export PATH=/bin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+for m in netfs 9pnet 9pnet_virtio 9p overlay; do
+	[ -e /mods/$m.ko ] && insmod /mods/$m.ko
+done
+p9=trans=virtio,version=9p2000.L,msize=1048576
+mount -t 9p -o $p9,ro hostroot /lower || { echo "vmtest: mounting the host root failed"; poweroff -f; }
+mount -t tmpfs tmpfs /upper
+mkdir -p /upper/u /upper/w
+mount -t overlay overlay -o lowerdir=/lower,upperdir=/upper/u,workdir=/upper/w /newroot ||
+	{ echo "vmtest: overlay failed"; poweroff -f; }
+mkdir -p /newroot/share
+mount -t 9p -o $p9 share /newroot/share
+
+# Boot only what the tests need: no fstab mounts, and none of the units
+# that fail on a read-only shared root and would drop to emergency mode.
+: >/newroot/etc/fstab
+for u in systemd-remount-fs.service emergency.service emergency.target rescue.service rescue.target tmp.mount; do
+	ln -sf /dev/null /newroot/etc/systemd/system/$u
+done
+cat >/newroot/etc/systemd/system/secwrap-vmtest.service <<'EOF'
+[Unit]
+DefaultDependencies=no
+[Service]
+Type=oneshot
+FailureAction=poweroff-force
+ExecStart=/bin/sh -c '/share/tests.sh /share/secwrap > /share/result.txt 2>&1; echo $? > /share/status; systemctl poweroff -f'
+EOF
+umount /proc /sys /dev
+exec switch_root /newroot /lib/systemd/systemd
