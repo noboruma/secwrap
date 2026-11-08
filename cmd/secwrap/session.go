@@ -21,30 +21,27 @@ import (
 // session holds what monitor, run, attach and shell share: the common
 // flags, the live event log, the asker and the summary.
 type session struct {
-	// what to watch, and what to do with each
 	net, files, exec category
 	sbomDir          string
 	sbomTemp         bool // bare --sbom: in the history folder (or /tmp)
-	// what to do with it
-	deny     bool // --deny: the action of categories given bare
-	askOn    bool // --ask: the same, asking (wins over --deny)
-	askSet   bool // --ask was given (shell: --deny alone turns asking off)
-	noInline bool // --no-inline: don't ask in the terminal (the web page and attach still do)
-	shell    bool // secwrap shell: inline questions only with freezing
-	allow    stringList
-	sens     stringList
-	// how
-	user    string // --user: run the command as this user
-	runAs   *user.User
-	log     string // "" (stderr) | off | FILE
-	wait    bool   // keep monitoring background processes after the command
-	summ    bool   // print the summary at the end
-	histDir string // "" (~/.local/state/secwrap) | off | DIR
-	hist    *history
-	sess    *liveSession
-	web     string // --web: serve every session's page at this address (off: "")
-	webSet  bool   // the address was given: don't move to the next free port
-	webHost *webHost
+	deny             bool // --deny: the action of categories given bare
+	askOn            bool // --ask, on by default where asking works; wins over --deny
+	askSet           bool // --ask was given (--deny alone turns the default asking off)
+	noInline         bool // --no-inline: don't ask in the terminal (the web page and attach still do)
+	shell            bool // secwrap shell: inline questions only with freezing
+	allow            stringList
+	sens             stringList
+	user             string // --user: run the command as this user
+	runAs            *user.User
+	log              string // "" (stderr) | off | FILE
+	wait             bool   // keep monitoring background processes after the command
+	summ             bool   // print the summary at the end
+	histDir          string // "" (~/.local/state/secwrap) | off | DIR
+	hist             *history
+	sess             *liveSession
+	web              string // --web: serve every session's page at this address (off: "")
+	webSet           bool   // the address was given: don't move to the next free port
+	webHost          *webHost
 
 	sboms   *sbomStore
 	logW    io.Writer // live events
@@ -56,10 +53,14 @@ type session struct {
 }
 
 // newSession registers the common flags. withAsk adds --ask and --user,
-// which only make sense for a launched command (not attach).
+// which only make sense for a launched command (not attach), and makes
+// asking the action of categories given bare.
 func newSession(fs *flag.FlagSet, withAsk bool) *session {
-	s := &session{caps: monitor.ProbeCaps()}
-	modes := "off, log, ask or deny (bare: log, or --deny/--ask)"
+	s := &session{caps: monitor.ProbeCaps(), askOn: withAsk}
+	modes := "off, log, ask or deny (bare: ask, log with --ask=off, deny with --deny)"
+	if !withAsk {
+		modes = "off, log or deny (bare: log, or deny with --deny)"
+	}
 	fs.Var(catFlag{&s.net}, "net", "watch the network: TCP connect/accept, UDP sends; "+modes)
 	fs.Var(catFlag{&s.files}, "filesystem", "watch file opens (BPF LSM); "+modes+";\n"+
 		"deny/ask apply to writes and sensitive reads")
@@ -69,8 +70,9 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 		"bare --sbom: sboms/ in the session's history folder (/tmp with --history off)")
 	fs.BoolVar(&s.deny, "deny", false, "deny every category given bare (--net, --filesystem, --exec without a mode)")
 	if withAsk {
-		fs.Var(askFlag{s}, "ask", "ask about every category given bare: each call pauses until answered, here in the\n"+
-			"terminal, on the web page or with secwrap session attach (the first answer wins)")
+		fs.Var(askFlag{s}, "ask", "ask about every category given bare (--ask=off: log them): each call pauses until\n"+
+			"answered, here in the terminal, on the web page or with secwrap session attach (the first answer wins)")
+		fs.Lookup("ask").DefValue = "on"
 		fs.BoolVar(&s.noInline, "no-inline", false, "don't ask in the terminal: answer on the web page or with secwrap session attach")
 		fs.StringVar(&s.user, "user", "", "run the command as this user (name or uid), with its groups and HOME (default:\n"+
 			"whoever ran secwrap: you when it asked sudo itself, root when started as root)")
@@ -88,6 +90,16 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 	fs.BoolVar(&s.summ, "summary", false, "print the summary at the end (it is always in the history folder)")
 	fs.StringVar(&s.histDir, "history", "", "keep every session in a folder under DIR (default ~/.local/state/secwrap), or off")
 	fs.StringVar(&s.log, "log", "", "live events to FILE instead of stderr (JSON lines if it ends in .json/.jsonl), or off")
+	// Every category is watched by default, with the action of categories
+	// given bare: asked about (logged on attach), denied with --deny.
+	def := "ask"
+	if !withAsk {
+		def = "log"
+	}
+	for _, name := range []string{"net", "filesystem", "exec"} {
+		fs.Set(name, "true")
+		fs.Lookup(name).DefValue = def
+	}
 	return s
 }
 
@@ -111,6 +123,9 @@ func (s *session) run(ctx context.Context, o monitor.Options) (*monitor.Report, 
 	}
 	// What this kernel can't do fails here, with why, before anything loads.
 	if err := s.caps.Check(&o); err != nil {
+		if s.askOn && !s.askSet { // asking only by default
+			err = fmt.Errorf("%w; or pass --ask=off to log instead", err)
+		}
 		return nil, err
 	}
 	sess, err := createSession(sessionName(o), s.info(o))
@@ -120,7 +135,7 @@ func (s *session) run(ctx context.Context, o monitor.Options) (*monitor.Report, 
 	s.sess = sess
 	var rep *monitor.Report
 	defer func() { s.sess.end(rep) }()
-	if s.histDir != "off" { // named after the session
+	if s.histDir != "off" {
 		if s.hist, err = openHistory(s.histDir, sess.info.ID); err != nil {
 			return nil, err
 		}
@@ -370,7 +385,7 @@ func (f askFlag) Set(v string) error {
 }
 
 // resolve gives the categories given bare the action of --ask (first) or
-// --deny. --deny without --ask turns a default --ask (shell) off.
+// --deny. --deny without --ask turns the default asking off.
 func (s *session) resolve() {
 	if s.deny && !s.askSet {
 		s.askOn = false
@@ -389,10 +404,37 @@ func (s *session) resolve() {
 	}
 }
 
+// bareLog makes the categories given bare log, unless --ask was given: for
+// --all, where asking is not possible. (Run then refuses an explicit ask.)
+func (s *session) bareLog() {
+	if !s.askSet {
+		s.askOn = false
+		s.resolve()
+	}
+}
+
 // parse parses args into fs (see parseFlags), then checks --user.
 func (s *session) parse(fs *flag.FlagSet, args []string) {
 	parseFlags(fs, args)
 	s.resolve()
+	// Files and exec are watched by default only where the kernel can (the
+	// BPF LSM); without it, watch the rest rather than refuse to start.
+	// Asked for, they still fail, saying why.
+	if why := s.caps.Files().Why; !s.caps.Files().Log {
+		var dropped []string
+		for _, c := range []struct {
+			name string
+			cat  *category
+		}{{"filesystem", &s.files}, {"exec", &s.exec}} {
+			if c.cat.on && !flagGiven(args, c.name) {
+				c.cat.on = false
+				dropped = append(dropped, c.name)
+			}
+		}
+		if len(dropped) > 0 {
+			fmt.Fprintf(os.Stderr, "secwrap: %s unavailable (%s): not watched\n", strings.Join(dropped, " and "), why)
+		}
+	}
 	if err := s.resolveUser(); err != nil {
 		fmt.Fprintln(os.Stderr, "secwrap:", err)
 		os.Exit(2)
@@ -439,8 +481,8 @@ func parseFlags(fs *flag.FlagSet, args []string) {
 	fs.Parse(out)
 }
 
-// resolveUser looks --user up. It runs
-// before the command is built (shell picks that user's login shell).
+// resolveUser looks --user up, before the command is built (shell picks
+// that user's login shell).
 func (s *session) resolveUser() error {
 	if s.user == "" {
 		return nil
@@ -581,7 +623,6 @@ func (s *session) start(cmd []string) error {
 	return nil
 }
 
-// asking: some watched category is asked about.
 func (s *session) asking() bool {
 	for _, c := range []category{s.net, s.files, s.exec} {
 		if c.on && c.act == monitor.ActionAsk {

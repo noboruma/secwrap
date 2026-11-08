@@ -3,7 +3,7 @@
 Watch what a process does, and decide what it's allowed to do.
 
 `secwrap` runs a command (or a whole shell) under eBPF and covers three kinds of access by the process and its children.
-For each one, you can **log** it, **ask** before allowing it, or **deny** it:
+By default `secwrap` **asks** you before allowing each one; you can **log** or **deny** any of them instead:
 
 | Access | Flag | What it covers | `log` | `ask` | `deny` |
 | --- | --- | --- | --- | --- | --- |
@@ -20,7 +20,7 @@ runs another program. `secwrap` puts those three moments under your control for 
 `npm install`, a `curl | sh`, a build step, or an AI coding agent running shell commands on your machine — without
 changing the command or trusting it.
 
-- **Vet an install script** before it touches your keys: `secwrap monitor --net ask --filesystem ask -- ./install.sh`
+- **Vet an install script** before it touches your keys: `secwrap monitor -- ./install.sh`
 - **Keep a coding agent on a leash**: approve every connection, write and exec it attempts.
 - **Record what a build really does**, then turn it into a JSON report or a CycloneDX SBOM for an audit.
 
@@ -84,8 +84,8 @@ Every session runs the same check at startup and refuses what the kernel can't d
 - Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), on any architecture listed above.
 - **Root access through `sudo`** (or running as root). `secwrap` asks for your password once, at startup. It then
   keeps root until the session ends. The command you monitor runs as you (see [Running as root](#running-as-root)).
-- `ask` (and so `secwrap shell`): Linux 5.19+ with cgroup v2, to freeze the command while a question is up. Older
-  kernels can only log and deny.
+- `ask`, the default (and so `secwrap shell`): Linux 5.19+ with cgroup v2, to freeze the command while a question is
+  up. Older kernels can only log and deny: give the mode (`--net log`), or `--ask=off`.
 - The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
   default on Debian 13). Otherwise add it to the kernel command line, e.g. `lsm=...,bpf`.
 - BPF LSM programs also need a 64-bit kernel whose BPF JIT has trampolines: x86_64, arm64, riscv64, s390x,
@@ -103,44 +103,31 @@ Without the BPF LSM, or on a kernel that can't run it:
 | Feature | Without the BPF LSM |
 | --- | --- |
 | `--net` (log, ask, deny) | Works: it uses cgroup and kprobe hooks, not the LSM |
-| `--filesystem` | Refused at startup, with the reason |
-| `--exec` | Refused at startup, with the reason |
+| `--filesystem`, `--exec` | Not watched by default, with a note saying why; refused at startup when given explicitly |
 | `--sbom` | Refused at startup, with the reason |
-| `secwrap shell` | Watches the network only, and says why (`--filesystem` is only its default) |
 | Binaries and SBOMs on the web page | Not collected; the page lists no binaries |
 
 ## Usage
 
-Set a mode for each kind of access: `log`, `ask`, `deny` or `off`. A flag given without a mode logs.
-
-| Flag | `log` | `ask` | `deny` |
-| --- | --- | --- | --- |
-| `--net` | `--net log` | `--net ask` | `--net deny` |
-| `--filesystem` | `--filesystem log` | `--filesystem ask` | `--filesystem deny` |
-| `--exec` | `--exec log` | `--exec ask` | `--exec deny` |
-
-`--ask` or `--deny` sets the mode of every flag given without one: `--net --filesystem --ask` asks about both.
+By default `secwrap` asks about all three: `secwrap monitor -- ./install.sh` stops at each new connection, each write
+or sensitive read, and each new program. Give a flag a mode (`log`, `deny` or `off`) to change that one; the others
+keep asking:
 
 ```sh
-# Network
-secwrap monitor --net log -- ./mybinary                     # log every connection
-secwrap monitor --net ask -- ./install.sh                   # ask before each new connection
-secwrap monitor --net deny -- curl https://example.com      # block all network access
-
-# Files
-secwrap monitor --filesystem log -- ./mybinary              # log every file opened
-secwrap monitor --filesystem ask -- ./install.sh            # ask before each write or sensitive read
-secwrap monitor --filesystem deny -- ./mybinary             # block writes and sensitive reads
-
-# Execution
-secwrap monitor --exec log -- ./mybinary                    # log every program started
-secwrap monitor --exec ask -- ./install.sh                  # ask before each new program
-secwrap monitor --exec deny -- ./mybinary                   # block starting any other program
-
-# Combined
-secwrap monitor --net ask --filesystem log -- ./install.sh  # ask about the network, log files
-secwrap shell                                               # an interactive shell that asks about network and files
+secwrap monitor -- ./install.sh                  # ask about connections, writes, sensitive reads and programs
+secwrap monitor --exec off -- ./install.sh       # the same, but let it run any program
+secwrap monitor --net log -- ./build.sh          # record connections, ask about the rest
+secwrap monitor --ask=off -- make                # record everything, ask nothing
+secwrap monitor --deny -- ./untrusted            # no network, no writes or sensitive reads, no other programs
+secwrap monitor --net deny --filesystem off --exec off -- curl https://example.com  # only block the network
+secwrap shell                                    # an interactive shell that asks about network and files
 ```
+
+`--ask=off` and `--deny` change the default for every flag not given a mode. `secwrap shell` doesn't ask about
+programs unless you add `--exec`, since that would mean a question for each new command you type. `secwrap attach` and
+`secwrap monitor --all` have no launched command to ask about, so there the default is to log all three. In scripts
+and CI, where nobody is there to answer, use `--ask=off` or give modes: a question nobody answers keeps the command
+waiting.
 
 #### Which file reads are asked about
 
@@ -163,12 +150,12 @@ about or blocked: writes are covered everywhere already, sensitive or not. The l
 defaults included, so you can add up to 9. A folder covers everything inside it:
 
 ```sh
-secwrap monitor --filesystem ask --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./install.sh
+secwrap monitor --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./install.sh
 ```
 
 ### Answering
 
-When you use `ask`, the process waits until you answer:
+For each question, the process waits until you answer:
 
 ```
 [ask] Allow curl (pid 4242) tcp connect to 93.184.215.14:443? [y/N]
@@ -207,7 +194,7 @@ exec sudo -n /usr/local/sbin/secwrap-session "$@"
 
 ```sh
 #!/bin/sh
-exec /usr/local/bin/secwrap shell --user "$SUDO_USER" --net --filesystem --exec -- /bin/bash "$@"
+exec /usr/local/bin/secwrap shell --user "$SUDO_USER" --exec -- /bin/bash "$@"
 ```
 
 ```sh
@@ -228,7 +215,7 @@ already running when you attach and the ones started later. Only what they do fr
 belongs to init) is no longer a child, so attach to it by its own PID. The session ends when every watched process has
 exited, or on Ctrl-C.
 
-`log` and `deny` work on an attached process directly, through the kernel hooks. For `deny`, each process is moved into
+`log` (the default here) and `deny` work on an attached process directly, through the kernel hooks. For `deny`, each process is moved into
 a `secwrap-deny-<pid>` cgroup created under the cgroup it was already in, so its container or systemd unit limits keep
 applying, and it is moved back when `secwrap` stops. Where no child cgroup can be created there, the `deny` cgroup is
 made at the root instead. If `secwrap` is killed outright (`kill -9`, a crash), the kernel drops the blocking with it
@@ -318,7 +305,7 @@ load its eBPF programs. Most of the differences follow from that.
 **Where `secwrap` is stronger**
 
 - **Commands that really need root.** Installers like `./install.sh` often have to write to `/usr` or `/etc`.
-  `sudo secwrap monitor --filesystem ask -- ./install.sh` runs the script as root and still stops at each write:
+  `sudo secwrap monitor -- ./install.sh` runs the script as root and still stops at each write:
   *allow WRITE /etc/systemd/system/foo.service?* Run as yourself, a script that calls `sudo` partway through gets
   root too and stays watched, in every mode: the kernel hooks follow the process tree, not the user. sandlock always
   sets `NO_NEW_PRIVS`, so nothing inside it can gain root. When it is started as root it doesn't drop capabilities,

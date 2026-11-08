@@ -6,6 +6,7 @@ SW=${1:?path to secwrap}
 export HOME=/run/secwrap-home # /root is not readable through the share
 mkdir -p "$HOME"
 D=$(mktemp -d -p /run) U=swtest-$$ PORT=18080
+ONLY="--filesystem=off --exec=off" # every category is asked about by default
 pass=0 fail=0 SWPID= LPID=
 ok() { echo "PASS  $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL  $*"; fail=$((fail + 1)); }
@@ -47,7 +48,7 @@ KID=$(pgrep -P $MAIN -x sleep | head -1)
 UNITCG=$(cg $MAIN)
 [ "$(conn_state)" = OK ] && ok "connects work before attach" || bad "connects before attach: $(tail -n1 $D/conn.log)"
 
-$SW attach --net=deny --no-web --log off $MAIN >$D/attach.out 2>&1 &
+$SW attach --net=deny $ONLY --no-web --log off $MAIN >$D/attach.out 2>&1 &
 SWPID=$!
 sleep 3
 WANT="$UNITCG/secwrap-deny-$SWPID"
@@ -73,7 +74,7 @@ systemd-run -q --unit=$U-thr python3 -c 'import threading,time; threading.Thread
 sleep 1.5
 P=$(systemctl show -p MainPID --value $U-thr)
 TID=$(ls /proc/$P/task | grep -vx $P | head -1)
-timeout 20 $SW attach --net=log --no-web --log off $TID >$D/thread.out 2>&1 &
+timeout 20 $SW attach --net=log $ONLY --no-web --log off $TID >$D/thread.out 2>&1 &
 SWPID=$!
 sleep 3
 kill -9 $P
@@ -92,7 +93,7 @@ MAIN=$(mainpid $U-multi)
 SUB=$(pgrep -P $MAIN | head -1)
 MAINCG=$(cg $MAIN) SUBCG=$(cg $SUB)
 [ "$SUBCG" != "$MAINCG" ] && [ -n "$SUB" ] || bad "setup: child $SUB is in $SUBCG, parent in $MAINCG"
-$SW attach --net=deny --no-web --log off $MAIN >$D/multi.out 2>&1 &
+$SW attach --net=deny $ONLY --no-web --log off $MAIN >$D/multi.out 2>&1 &
 SWPID=$!
 sleep 3
 [ "$(cg $MAIN)" = "$MAINCG/secwrap-deny-$SWPID" ] && [ "$(cg $SUB)" = "$SUBCG/secwrap-deny-$SWPID" ] &&
@@ -109,7 +110,7 @@ cp /bin/sleep $D/swnamed
 systemd-run -q --unit=$U-name $D/swnamed 600
 sleep 1.5
 P=$(mainpid $U-name) PCG=$(cg $P)
-$SW attach --net=deny --no-web --log off --name swnamed >$D/name.out 2>&1 &
+$SW attach --net=deny $ONLY --no-web --log off --name swnamed >$D/name.out 2>&1 &
 SWPID=$!
 sleep 3
 [ "$(cg $P)" = "$PCG/secwrap-deny-$SWPID" ] && ok "found by name and moved" || bad "by name: cgroup $(cg $P): $(tail -n3 $D/name.out)"
@@ -122,7 +123,7 @@ systemd-run -q --unit=$U-fb /bin/bash -c "$(loop $D/fb.log)"
 sleep 1.5
 P=$(mainpid $U-fb) PCG=$(cg $P)
 echo 0 >/sys/fs/cgroup$PCG/cgroup.max.descendants
-$SW attach --net=deny --no-web --log off $P >$D/fallback.out 2>&1 &
+$SW attach --net=deny $ONLY --no-web --log off $P >$D/fallback.out 2>&1 &
 SWPID=$!
 sleep 3
 [ "$(cg $P)" = "/secwrap-deny-$SWPID" ] && ok "moved to the deny cgroup at the root" || bad "fallback: cgroup $(cg $P): $(tail -n3 $D/fallback.out)"
@@ -141,7 +142,7 @@ ctypes.CDLL(None).pthread_exit(None)'
 sleep 0.5
 P=$(mainpid $U-leader)
 t0=$SECONDS
-timeout 30 $SW attach --net=log --no-web --log off $P >$D/leader.out 2>&1 &
+timeout 30 $SW attach --net=log $ONLY --no-web --log off $P >$D/leader.out 2>&1 &
 SWPID=$!
 sleep 6
 state=$(sed -n 's/^State:\s*//p' /proc/$P/status)
@@ -157,7 +158,7 @@ echo "== the unit is stopped while attached"
 systemd-run -q --unit=$U-stop /bin/bash -c "sleep 600 & $(loop $D/stop.log)"
 sleep 1.5
 P=$(mainpid $U-stop) PCG=$(cg $P)
-timeout 30 $SW attach --net=deny --no-web --log off $P >$D/unitstop.out 2>&1 &
+timeout 30 $SW attach --net=deny $ONLY --no-web --log off $P >$D/unitstop.out 2>&1 &
 SWPID=$!
 sleep 3
 systemctl stop $U-stop
@@ -170,7 +171,7 @@ sleep 1
 
 echo "== launched command with --net=deny"
 OWN=$(cg $$)
-$SW monitor --net=deny --no-web --log off -- bash -c \
+$SW monitor --net=deny $ONLY --no-web --log off -- bash -c \
 	"sed -n 's/^0:://p' /proc/self/cgroup; exec 3<>/dev/tcp/127.0.0.1/$PORT && echo OK || echo BLOCKED" >$D/cmd.out 2>&1
 CMDCG=$(grep -m1 secwrap-deny $D/cmd.out)
 case "$CMDCG" in
@@ -182,15 +183,24 @@ grep -qx BLOCKED $D/cmd.out && ok "command's connect blocked" || bad "command ou
 echo "== launched command with ask: its freeze cgroup"
 # No exec and no network: nothing is asked, but the command still runs in
 # the cgroup that would be frozen during a question.
-timeout 30 $SW monitor --exec=ask --no-web --log off -- /bin/bash -c 'read l < /proc/self/cgroup; echo "CG=${l#0::}"' >$D/ask.out 2>&1
+timeout 30 $SW monitor --exec=ask --net=off --filesystem=off --no-web --log off -- /bin/bash -c 'read l < /proc/self/cgroup; echo "CG=${l#0::}"' >$D/ask.out 2>&1
 CMDCG=$(sed -n 's/^CG=//p' $D/ask.out)
 case "$CMDCG" in
 "$OWN"/secwrap-ask-*) ok "command ran in a child of secwrap's own cgroup" ;;
 *) bad "ask command cgroup: '$CMDCG' (secwrap's: $OWN): $(tail -n3 $D/ask.out)" ;;
 esac
 
+echo "== no flags: everything asked about"
+# A builtin-only command: no exec, no network, no sensitive read, so
+# nothing to ask; secwrap must still start with all three on.
+timeout 30 $SW monitor --no-web --log off -- /bin/bash -c 'read l < /proc/self/version; echo DONE' >$D/defaults.out 2>&1
+rc=$?
+grep -q '^NETWORK: *ASK' $D/defaults.out && grep -q '^FILESYSTEM: *ASK' $D/defaults.out && grep -q '^EXEC: *ASK' $D/defaults.out &&
+	grep -qx DONE $D/defaults.out && [ $rc -eq 0 ] && ok "network, filesystem and exec all asked about" ||
+	bad "defaults: rc=$rc: $(head -n6 $D/defaults.out)"
+
 echo "== other modes run and clean up"
-for m in "--filesystem=log --exec=log" "--filesystem=deny --exec=deny --net=deny" \
+for m in "--net=off --filesystem=log --exec=log" "--filesystem=deny --exec=deny --net=deny" \
 	"--net=log --filesystem=log --exec=log --sbom $D/sbom"; do
 	timeout 30 $SW monitor $m --no-web --log off -- /bin/sh -c 'ls / >/dev/null; cat /etc/hostname >/dev/null; true' >$D/mode.out 2>&1
 	rc=$?

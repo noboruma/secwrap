@@ -1,14 +1,11 @@
 package main
 
 // The web page for every session, served from the session files by
-// whichever secwrap running a session holds the lock of its address
-// (--web-addr, default 127.0.0.1:9000; none with --no-web). One host per
-// address, every address showing every session. Each secwrap keeps trying
-// to take its address's lock, so as long as one runs the page is up: when
-// the host exits (or its listener dies) the next takes over within a
-// second, on the same URL (the token is shared by every address). And the terminal UI of secwrap
-// session, to see sessions alive or dead, attach, choose which are on the
-// web page, and delete dead ones.
+// whichever running secwrap holds the lock of its address (--web-addr,
+// default 127.0.0.1:9000). Every secwrap keeps trying to take its address's
+// lock, so when the host exits the next one takes over within a second, on
+// the same URL (the token is shared). Also the terminal UI of secwrap
+// session: sessions alive or dead, attach, hide from the page, delete.
 //
 //	/var/lib/secwrap/web-ADDR.lock  flock-ed by the host of ADDR
 //	/var/lib/secwrap/web-ADDR.json  its address and pid (root only)
@@ -307,7 +304,6 @@ func (h *webHost) close() {
 	<-h.done
 }
 
-// ---------------------------------------------------------------------------
 // Web
 
 var sbomFileRe = regexp.MustCompile(`^[A-Za-z0-9._+-]+\.cdx\.json$`)
@@ -582,7 +578,6 @@ func serveSBOM(rw http.ResponseWriter, r *http.Request, v sessionView) {
 	rw.Write(data)
 }
 
-// ---------------------------------------------------------------------------
 // secwrap session: the terminal UI. It serves no page: the secwraps that
 // run sessions do.
 

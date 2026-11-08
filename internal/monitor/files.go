@@ -381,7 +381,6 @@ func fileEventPath(r *secwrapFileEvent) string {
 	return cString(r.Path[:])
 }
 
-// ---------------------------------------------------------------------------
 // Scope (must match path_excluded / path_sensitive in filemon.bpf.c)
 
 type sensPath struct {
@@ -501,7 +500,6 @@ func (s *fileScope) sensitive(p string) bool {
 	return false
 }
 
-// ---------------------------------------------------------------------------
 // Aggregation
 
 type fileAggregator struct {

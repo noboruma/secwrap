@@ -152,7 +152,8 @@ int kp_udpv6_sendmsg(struct pt_regs *ctx)
 }
 
 /* ------------------------------------------------------------------------
- * Deny mode: attached to a dedicated cgroup v2 holding only the target.
+ * Deny mode: attached to secwrap's deny cgroups, which hold only watched
+ * processes.
  * Every inet connect / UDP send is rejected (syscall fails with EPERM) and
  * reported, unless the peer is in the allow map (filled by ask mode). Any
  * other packet (raw sockets, ICMP, inbound) not to/from an allowed peer is

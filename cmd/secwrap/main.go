@@ -75,12 +75,12 @@ func usage() {
   secwrap cap                                  what this kernel supports: network, filesystem, exec, sbom
   secwrap session list | attach [ID] | delete ID  list; answer one's questions here (root); delete dead ones
 
-What to watch, and what to do with each: off, log, ask or deny (shell: --net --filesystem --ask):
+What to watch, and what to do with each: off, log, ask or deny; bare, ask (shell: --net --filesystem):
   --net [MODE]          network: TCP connect/accept, UDP sends
   --filesystem [MODE]   file opens (BPF LSM); deny/ask: writes and sensitive reads
   --exec [MODE]         programs executed (BPF LSM); deny/ask: every exec but CMD
   --sbom [DIR]          a CycloneDX SBOM in DIR (default: the history folder) for every binary executed
-  --deny, --ask         the mode of categories given bare (default: log)
+  --deny, --ask=off     categories given bare are denied, or logged (default: ask; attach and --all: log)
   --no-inline           don't ask in the terminal (the web page and secwrap session attach always can)
   --web-addr ADDR       serve every session's web page at ADDR (default 127.0.0.1:9000; 9000, :9000, 0.0.0.0:9100)
                         unless a secwrap already serves that address; one host per address, all show every session
@@ -144,6 +144,9 @@ func cmdMonitor(args []string) error {
 	all := fs.Bool("all", false, "monitor every process on the host")
 	out := fs.String("o", "", "write the JSON report to FILE ('-' for stdout)")
 	s.parse(fs, args)
+	if *all {
+		s.bareLog() // nothing to ask: no launched command
+	}
 
 	o := s.options(fs.Args())
 	o.All = *all
@@ -237,11 +240,8 @@ func cmdAttach(args []string) error {
 		return err
 	}
 	if o.Asks() {
-		// Ask on attach needs a seccomp listener for each running process;
-		// installing one into a process secwrap did not launch isn't wired
-		// up here yet. The flag, validation and supervisor are in place so
-		// a caller that can supply listeners (Options.AskListeners) gets a
-		// working ask-on-attach.
+		// Ask on attach needs a seccomp listener per running process
+		// (Options.AskListeners), and nothing supplies them yet.
 		return errors.New("secwrap attach: ask mode on attach is not available in this build (--allow-ask is accepted, but pausing a running process's syscalls is not yet implemented)")
 	}
 	fmt.Fprintf(os.Stderr, "secwrap: attaching to %v and their children; Ctrl-C to stop\n", pids)
@@ -269,7 +269,6 @@ func exitWith(rep *monitor.Report) error {
 	return nil
 }
 
-// chownToInvoker hands files created under sudo back to the real user.
 // invoker is the user who ran sudo, while we run as root; nil otherwise.
 // Files secwrap writes for them (history, SBOMs, logs) are given to them.
 func invoker() *user.User {

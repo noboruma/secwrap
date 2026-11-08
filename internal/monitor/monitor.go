@@ -72,7 +72,7 @@ type Report struct {
 	Ended     time.Time  `json:"ended"`
 	ExitCode  *int       `json:"exitCode,omitempty"`
 	Attached  []int      `json:"attachedPids,omitempty"`
-	Endpoints []Endpoint `json:"endpoints,omitempty"` // with Net
+	Endpoints []Endpoint `json:"endpoints,omitempty"`
 	// Network blocked (--net with --deny/--ask).
 	Denied         bool   `json:"denied,omitempty"`
 	DroppedEgress  uint64 `json:"droppedEgressPackets,omitempty"`
@@ -94,42 +94,28 @@ type Options struct {
 	Command []string
 	All     bool
 
-	// AllowAsk permits ask mode when attaching to running processes (PIDs
-	// set), which otherwise needs a command secwrap launches so it can
-	// install the seccomp filter before exec. The seccomp notification
-	// listeners for the already-running processes are supplied through
-	// AskListeners. Those processes keep no_new_privs set, so they cannot
-	// gain privileges (sudo, setuid) afterwards; see secwrap attach
-	// --allow-ask.
+	// AllowAsk permits ask mode with PIDs. The attached processes are left
+	// with no_new_privs set, so they can't gain privileges afterwards.
 	AllowAsk bool
-	// AskListeners are seccomp notification listener fds, one per attached
-	// process, used when AllowAsk is set. Run takes ownership of each fd and
-	// closes it when the session ends. Producing them (pausing a running
-	// process's syscalls) is the caller's responsibility; the CLI has no
-	// source for them yet, so secwrap attach --allow-ask reports that.
+	// AskListeners are the seccomp notification fds for the attached
+	// processes, one each, used with AllowAsk. Run closes them.
 	AskListeners []int
 
-	// What to watch.
 	Net   bool // TCP connect/accept, UDP sends
-	Files bool // file opens (BPF LSM), --filesystem
+	Files bool // file opens (BPF LSM)
 	Exec  bool // programs executed (BPF LSM)
 	// OnBinary is called for every file the target executes, interpreters
 	// and the dynamic loader included (BPF LSM; used for --sbom). It must
 	// not block.
 	OnBinary func(FileEvent)
 
-	// What to do with each category watched (Net, Files, Exec above):
-	// ActionLog records it, ActionDeny refuses it in the kernel (Net all
-	// network access, Files writes and sensitive reads, Exec every program
-	// but the launched command), ActionAsk pauses those calls until Ask
-	// returns a decision (only with Command); what is not allowed yet is
-	// refused, as with ActionDeny. Ask may be called concurrently, once per
-	// distinct question; ctx is cancelled when the paused task goes away.
+	// What to do with each watched category. ActionAsk pauses the call until
+	// Ask answers (Ask may run concurrently, once per distinct question; ctx
+	// ends when the paused task goes away); what isn't allowed is refused.
 	NetAction, FilesAction, ExecAction Action
 	Ask                                func(ctx context.Context, r AskRequest) AskAnswer
 	// FreezeOnAsk runs the command in a cgroup that AskRequest.Freeze can
-	// freeze, for questions asked on the terminal (cgroup v2, Linux 5.19+;
-	// without them Freeze stays nil).
+	// freeze while a question is on the terminal (cgroup v2, Linux 5.19+).
 	FreezeOnAsk bool
 	// Allow are folder rules: reads, writes or execs that need no answer.
 	Allow []FolderRule
@@ -137,25 +123,20 @@ type Options struct {
 	// /etc/shadow, ...). A directory covers everything below.
 	SensitivePaths []string
 
-	// RunAsInvoker drops the child's privileges to SUDO_UID/SUDO_GID: set when
-	// secwrap re-ran itself through sudo for a normal user.
+	// RunAsInvoker drops the command's privileges to SUDO_UID/SUDO_GID.
 	RunAsInvoker bool
-	// RunAs, if set, is the user the command runs as instead (its uid,
-	// group and supplementary groups, HOME, USER and LOGNAME). Its home is
-	// the one marked sensitive.
+	// RunAs is the user the command runs as instead; its home is the one
+	// marked sensitive.
 	RunAs *user.User
-	// Callbacks (optional): network events, file opens and execs (Kind
-	// "open" / "exec"), and the launched command exiting (its children may
-	// still run and be monitored).
+	// Optional callbacks. OnCommandExit fires when the launched command exits;
+	// its children may still run and be monitored.
 	OnEvent       func(Event)
 	OnFileEvent   func(FileEvent)
 	OnCommandExit func()
-	// WaitLeftovers keeps monitoring the command's background processes
-	// after it exits, until they exit too (or ctx ends). Without it they
-	// are stopped (SIGTERM, then SIGKILL) and the session ends with the
-	// command.
+	// WaitLeftovers keeps monitoring the command's background processes after
+	// it exits. Without it they are stopped and the session ends.
 	WaitLeftovers bool
-	// Stdin/Stdout/Stderr for the launched command.
+
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
 }
@@ -179,13 +160,10 @@ func (a Action) String() string {
 	return "log"
 }
 
-// enforcesNet, enforcesFiles and enforcesExec: the category is watched and
-// denied or asked about.
 func (o *Options) enforcesNet() bool   { return o.Net && o.NetAction != ActionLog }
 func (o *Options) enforcesFiles() bool { return o.Files && o.FilesAction != ActionLog }
 func (o *Options) enforcesExec() bool  { return o.Exec && o.ExecAction != ActionLog }
 
-// enforcing: some watched category is denied or asked about.
 func (o *Options) enforcing() bool { return o.enforcesNet() || o.enforcesFiles() || o.enforcesExec() }
 
 // Asks reports whether some watched category is asked about.
@@ -255,7 +233,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	}
 	emitFile := func(ev FileEvent) {
 		switch {
-		case ev.Kind == "exec": // bprm_creds_for_exec (--exec)
+		case ev.Kind == "exec":
 			execAgg.add(ev)
 		case ev.Exec && opts.OnBinary != nil:
 			opts.OnBinary(ev)
@@ -374,9 +352,8 @@ func (c *closers) add(f func()) { *c = append(*c, f) }
 
 func (c *closers) addLink(l link.Link) { c.add(func() { l.Close() }) }
 
-// close runs the closers in reverse order. Pointer receiver: with a value
-// one, "defer cleanup.close()" would copy the (still empty) slice at the
-// defer statement and never run anything added later.
+// close uses a pointer receiver: with a value one, "defer cleanup.close()"
+// would copy the still-empty slice and never run what is added later.
 func (c *closers) close() {
 	for i := len(*c) - 1; i >= 0; i-- {
 		(*c)[i]()
@@ -457,7 +434,7 @@ func startReaders(objs *traceObjects, files *fileObjects, emit func(Event), emit
 		for {
 			rec, err := rd.Read()
 			if err != nil {
-				return // closed
+				return
 			}
 			if binary.Read(bytes.NewReader(rec.RawSample), binary.NativeEndian, &raw) == nil {
 				emit(decode(&raw, wallOffset))
@@ -475,15 +452,10 @@ func startReaders(objs *traceObjects, files *fileObjects, emit func(Event), emit
 }
 
 // attachPIDs tracks running processes and all their descendants, moving
-// them into the deny cgroup in deny mode. It returns the processes it
-// attached.
-//
-// The fork tracepoint is already live, so each process is put in the map
-// before its children are looked for: a child forked after that is added
-// by the tracepoint, one forked before shows up in /proc on the next pass.
-// The cgroup move works the same way (a child forked after it inherits the
-// cgroup; one forked before is tracked and moved on the next pass), so we
-// repeat until a pass finds nothing new.
+// them into the deny cgroup in deny mode. The fork tracepoint is already
+// live, so each process is tracked (and moved) before its children are
+// looked for: a child forked after that is caught by the kernel, one forked
+// before shows up on the next pass. Passes repeat until nothing is new.
 func attachPIDs(opts Options, tracked *ebpf.Map, deny *denyCgroup) ([]int, error) {
 	// The BPF side keys on tgids: a thread id given here would never be
 	// matched, nor removed on exit.
@@ -530,11 +502,9 @@ func attachPIDs(opts Options, tracked *ebpf.Map, deny *denyCgroup) ([]int, error
 	return attached, nil
 }
 
-// waitTreeExit blocks until ctx is done or the tracked map is empty (the
-// exit tracepoint removes processes as they die, fork adds new children).
+// waitTreeExit blocks until ctx is done or no tracked process is left.
 // Entries whose process is gone are dropped too: one that exited just
-// before it was added (attach races with exit) would otherwise keep the
-// session waiting forever.
+// before it was tracked would otherwise never be removed.
 func waitTreeExit(ctx context.Context, tracked *ebpf.Map) {
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
@@ -553,7 +523,7 @@ func waitTreeExit(ctx context.Context, tracked *ebpf.Map) {
 				}
 			}
 			if live == 0 {
-				time.Sleep(200 * time.Millisecond) // drain in-flight events
+				time.Sleep(200 * time.Millisecond)
 				return
 			}
 		}
@@ -567,7 +537,7 @@ func waitTreeExit(ctx context.Context, tracked *ebpf.Map) {
 func attach(objs *traceObjects, net, deny bool) ([]link.Link, error) {
 	type probe struct {
 		name     string
-		optional bool // tolerate attach failure
+		optional bool
 		skip     bool
 		open     func() (link.Link, error)
 	}
@@ -609,14 +579,12 @@ func attach(objs *traceObjects, net, deny bool) ([]link.Link, error) {
 	return links, nil
 }
 
-// runCommand starts the command so that the fork is already tracked by the
-// time the child execs: we track our own tgid, the fork tracepoint adds the
-// child, then we untrack ourselves. No race with early connections.
-// With deny set, the child is created directly inside the deny cgroup
-// (clone3 CLONE_INTO_CGROUP): it never has network access, not even briefly.
-// With Ask set, the child first runs secwrap's ask helper, which installs
-// the seccomp notify filter and then execs the target.
-// With files enabled too, the filter also traps the open syscalls.
+// runCommand starts the command already tracked: we track our own tgid,
+// the fork tracepoint adds the child, then we untrack ourselves, so nothing
+// it does early is missed. With deny, the child is created inside the deny
+// cgroup (CLONE_INTO_CGROUP), never with network access. With Ask, it first
+// runs secwrap's ask helper, which installs the seccomp filter and execs
+// the target.
 func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askConfig) (int, error) {
 	deny := cfg.deny
 	track := func(pid int) error { return tracked.Put(uint32(pid), uint8(1)) }
@@ -768,7 +736,6 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 	return code, nil
 }
 
-// trackedPIDs lists the processes still in the tracked map.
 func trackedPIDs(tracked *ebpf.Map) []int {
 	var pids []int
 	var k uint32
@@ -832,7 +799,7 @@ func SudoUser() *user.User {
 	}
 	u, err := user.LookupId(strconv.Itoa(uid))
 	if err != nil {
-		// No passwd entry: the ids alone, as before.
+		// No passwd entry: the ids alone.
 		return &user.User{Uid: strconv.Itoa(uid), Gid: os.Getenv("SUDO_GID"), Username: os.Getenv("SUDO_USER")}
 	}
 	return u

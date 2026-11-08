@@ -80,7 +80,7 @@ int BPF_PROG(vc_file_open, struct file *file)
 	/* An exec open: newer kernels mark it in f_flags (__FMODE_EXEC), which
 	 * is what LSMs and fsnotify check; FMODE_EXEC in f_mode is not set. */
 	bool is_exec = (fmode & FMODE_EXEC) || (fflags & F_FMODE_EXEC);
-	/* Exec-only mode (SBOMs without --files): report executed files only. */
+	/* Exec-only mode (--sbom without --filesystem): report executed files only. */
 	if (!file_log_all && !is_exec)
 		return 0;
 

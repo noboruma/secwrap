@@ -1,8 +1,8 @@
 package main
 
-// A question (--ask) as the session files, the web page and the prompts
-// show it, the prompt that both --ask tty and secwrap session attach use,
-// and the terminal asker.
+// A question as the session files, the web page and the prompts show it,
+// the prompt that inline questions and secwrap session attach share, and
+// the terminal asker.
 
 import (
 	"bufio"
@@ -128,7 +128,6 @@ func (it webItem) decision(af answerFile) (a monitor.AskAnswer, ok bool) {
 	return monitor.Answer(monitor.DenyEndpoint), true
 }
 
-// ---------------------------------------------------------------------------
 // The prompt
 
 // readResult is what reading an answer line gave.
@@ -220,7 +219,6 @@ func pickFolder(w io.Writer, it webItem, read func() (string, readResult)) (stri
 	return "", gotLine
 }
 
-// ---------------------------------------------------------------------------
 // Inline questions (unless --no-inline)
 
 // ttyAsker asks on the controlling terminal (not stdin, which belongs to the

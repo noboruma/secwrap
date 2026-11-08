@@ -26,27 +26,19 @@ func cmdShell(args []string) error {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
 	s := newSession(fs, true)
 	out := fs.String("o", "", "write the JSON report to FILE when the shell exits ('-' for stdout)")
-	// Shell defaults: network and files, asked about inline (and on the web
-	// page), no live output (it would scribble over the shell; use --log
-	// FILE and tail -f it). --deny alone turns asking off.
-	for name, v := range map[string]string{"net": "true", "filesystem": "true", "log": "off"} {
+	// Shell defaults: network and files asked about, as everywhere, but not
+	// exec (every program typed would be asked about), and no live output
+	// (it would scribble over the shell; use --log FILE and tail -f it).
+	for name, v := range map[string]string{"exec": "off", "log": "off"} {
 		fs.Lookup(name).DefValue = v
 		fs.Set(name, v)
 	}
-	s.askOn, s.shell = true, true
-	fs.Lookup("ask").DefValue = "on"
+	s.shell = true
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: secwrap shell [flags] [-- SHELL [ARGS...]]")
 		fs.PrintDefaults()
 	}
 	s.parse(fs, args)
-	// --filesystem is only a default here: without the BPF LSM, watch the
-	// network alone rather than refuse to start. Asked for, it still fails.
-	if s.files.on && !s.caps.Files().Log && !flagGiven(args, "filesystem") {
-		fmt.Fprintf(os.Stderr, "secwrap: filesystem unavailable (%s): watching the network only\n", s.caps.Files().Why)
-		s.files.on = false
-	}
-
 	argv, cleanup, err := shellCommand(fs.Args(), s.shellUID())
 	if err != nil {
 		return err
@@ -172,9 +164,9 @@ func isSecwrapWrapper(sh string) bool {
 	return strings.HasPrefix(string(head[:n]), "#!") && strings.Contains(string(head[:n]), "secwrap")
 }
 
-// loginShell reads uid's shell from /etc/passwd ($SHELL is root's under sudo).
-var loginShellOverride string
+var loginShellOverride string // tests
 
+// loginShell reads uid's shell from /etc/passwd ($SHELL is root's under sudo).
 func loginShell(uid int) string {
 	if loginShellOverride != "" {
 		return loginShellOverride

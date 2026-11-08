@@ -55,7 +55,6 @@ type seccompNotifResp struct {
 	Flags uint32
 }
 
-// ---------------------------------------------------------------------------
 // Helper side: runs in the child, between fork and exec of the target.
 
 var (
@@ -209,7 +208,6 @@ func installNotifyFilter(nrs []uint32) (fd int, killable bool, err error) {
 	return int(r), killable, nil
 }
 
-// ---------------------------------------------------------------------------
 // Supervisor side.
 
 // askCommand prepares cmd to run the target through the helper, which runs

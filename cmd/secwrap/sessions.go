@@ -114,7 +114,6 @@ func lockHeld(path string) bool {
 	return errors.Is(err, syscall.EWOULDBLOCK)
 }
 
-// ---------------------------------------------------------------------------
 // The session side
 
 type liveSession struct {
@@ -403,7 +402,6 @@ func (a *sessionAsker) close() {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // The client side: session list, attach, the web page
 
 type sessionView struct {

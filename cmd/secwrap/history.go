@@ -27,8 +27,8 @@ import (
 )
 
 type history struct {
-	dir  string   // the session's folder
-	root *os.Root // dir
+	dir  string // the session's folder
+	root *os.Root
 	mu   sync.Mutex
 	evF  *os.File
 	evW  *bufio.Writer // events are many (every file open): one write per 64 KiB
