@@ -24,9 +24,9 @@ type session struct {
 	net, files, exec category
 	sbomDir          string
 	sbomTemp         bool // bare --sbom: in the history folder (or /tmp)
-	deny             bool // --deny: the action of categories given bare
-	askOn            bool // --ask, on by default where asking works; wins over --deny
-	askSet           bool // --ask was given (--deny alone turns the default asking off)
+	denyAll          bool // --deny-all: categories without a mode are denied
+	logOnly          bool // --log-only: categories without a mode are logged
+	askOn            bool // categories without a mode are asked about (the default for a launched command)
 	noInline         bool // --no-inline: don't ask in the terminal (the web page and attach still do)
 	shell            bool // secwrap shell: inline questions only with freezing
 	allow            stringList
@@ -52,35 +52,33 @@ type session struct {
 	caps    monitor.Caps // what this kernel supports
 }
 
-// newSession registers the common flags. withAsk adds --ask and --user,
+// newSession registers the common flags. withAsk adds --log-only and --user,
 // which only make sense for a launched command (not attach), and makes
-// asking the action of categories given bare.
+// asking the action of categories without a mode.
 func newSession(fs *flag.FlagSet, withAsk bool) *session {
 	s := &session{caps: monitor.ProbeCaps(), askOn: withAsk}
-	modes := "off, log, ask or deny (bare: ask, log with --ask=off, deny with --deny)"
+	modes := "off, log, ask or deny (bare: ask, log with --log-only, deny with --deny-all)"
 	if !withAsk {
-		modes = "off, log or deny (bare: log, or deny with --deny)"
+		modes = "off, log or deny (bare: log, or deny with --deny-all)"
 	}
 	fs.Var(catFlag{&s.net}, "net", "watch the network: TCP connect/accept, UDP sends; "+modes)
-	fs.Var(catFlag{&s.files}, "filesystem", "watch file opens (BPF LSM); "+modes+";\n"+
+	fs.Var(catFlag{&s.files}, "fs", "watch file opens (BPF LSM); "+modes+";\n"+
 		"deny/ask apply to writes and sensitive reads")
 	fs.Var(catFlag{&s.exec}, "exec", "watch programs executed (BPF LSM); "+modes+";\n"+
 		"deny/ask apply to every program but the launched command")
-	fs.Var(sbomFlag{s}, "sbom", "write a CycloneDX SBOM to DIR for every binary executed (listed on the --ask web page);\n"+
+	fs.Var(sbomFlag{s}, "sbom", "write a CycloneDX SBOM to DIR for every binary executed (listed on the web page);\n"+
 		"bare --sbom: sboms/ in the session's history folder (/tmp with --history off)")
-	fs.BoolVar(&s.deny, "deny", false, "deny every category given bare (--net, --filesystem, --exec without a mode)")
+	fs.BoolVar(&s.denyAll, "deny-all", false, "deny every category not given a mode, instead of asking")
 	if withAsk {
-		fs.Var(askFlag{s}, "ask", "ask about every category given bare (--ask=off: log them): each call pauses until\n"+
-			"answered, here in the terminal, on the web page or with secwrap session attach (the first answer wins)")
-		fs.Lookup("ask").DefValue = "on"
-		fs.BoolVar(&s.noInline, "no-inline", false, "don't ask in the terminal: answer on the web page or with secwrap session attach")
+		fs.BoolVar(&s.logOnly, "log-only", false, "log every category not given a mode, instead of asking (for scripts and CI)")
+		fs.BoolVar(&s.noInline, "no-inline", false, "don't ask in the terminal: answer on the web page or with secwrap sessions attach")
 		fs.StringVar(&s.user, "user", "", "run the command as this user (name or uid), with its groups and HOME (default:\n"+
 			"whoever ran secwrap: you when it asked sudo itself, root when started as root)")
 		fs.BoolVar(&s.wait, "wait", false, "when the command exits, keep monitoring its background processes until they exit\n"+
 			"(default: stop them and end the session)")
 	}
-	fs.Var(&s.allow, "allow", "with --deny/--ask: allow r(ead), w(rite) and/or (e)x(ec) under DIR, e.g. r:~/.oh-my-zsh, rwx:./build (repeatable)")
-	fs.Var(&s.sens, "sensitive", "with --filesystem: extra sensitive PATH (repeatable; a directory covers everything below)")
+	fs.Var(&s.allow, "allow", "in deny/ask mode: allow r(ead), w(rite) and/or (e)x(ec) under DIR, e.g. r:~/.oh-my-zsh, rwx:./build (repeatable)")
+	fs.Var(&s.sens, "sensitive", "with --fs: extra sensitive PATH (repeatable; a directory covers everything below)")
 	s.web = defaultWebAddr
 	fs.Var(optAddr{&s.web, &s.webSet}, "web-addr", "serve the web page of every session at ADDR (default "+defaultWebAddr+";\n"+
 		"9000, :9000, 0.0.0.0:9100), unless another secwrap serves that address already; takes over when\n"+
@@ -91,12 +89,12 @@ func newSession(fs *flag.FlagSet, withAsk bool) *session {
 	fs.StringVar(&s.histDir, "history", "", "keep every session in a folder under DIR (default ~/.local/state/secwrap), or off")
 	fs.StringVar(&s.log, "log", "", "live events to FILE instead of stderr (JSON lines if it ends in .json/.jsonl), or off")
 	// Every category is watched by default, with the action of categories
-	// given bare: asked about (logged on attach), denied with --deny.
+	// without a mode: asked about (logged on attach), or per --log-only/--deny-all.
 	def := "ask"
 	if !withAsk {
 		def = "log"
 	}
-	for _, name := range []string{"net", "filesystem", "exec"} {
+	for _, name := range []string{"net", "fs", "exec"} {
 		fs.Set(name, "true")
 		fs.Lookup(name).DefValue = def
 	}
@@ -123,8 +121,8 @@ func (s *session) run(ctx context.Context, o monitor.Options) (*monitor.Report, 
 	}
 	// What this kernel can't do fails here, with why, before anything loads.
 	if err := s.caps.Check(&o); err != nil {
-		if s.askOn && !s.askSet { // asking only by default
-			err = fmt.Errorf("%w; or pass --ask=off to log instead", err)
+		if s.askOn && s.bareAsk() {
+			err = fmt.Errorf("%w; or pass --log-only to log instead", err)
 		}
 		return nil, err
 	}
@@ -301,16 +299,16 @@ func (f sbomFlag) Set(v string) error {
 	return nil
 }
 
-// category is --net, --filesystem or --exec: watched or not, and what to
+// category is --net, --fs or --exec: watched or not, and what to
 // do with it.
 type category struct {
 	on       bool
 	act      monitor.Action
-	explicit bool // a mode was given: --deny/--ask leave it alone
+	explicit bool // a mode was given: --deny-all/--log-only leave it alone
 }
 
-// catFlag is --net/--filesystem/--exec [off|log|ask|deny]; bare, it is
-// watched with the action of --ask or --deny (log without either).
+// catFlag is --net/--fs/--exec [off|log|ask|deny]; bare, it is
+// watched with the default action (see resolve).
 type catFlag struct{ c *category }
 
 func (f catFlag) IsBoolFlag() bool { return true }
@@ -351,51 +349,15 @@ func (f catFlag) Set(v string) error {
 	return nil
 }
 
-// askFlag is --ask [on|off]: every category given bare is asked about.
-type askFlag struct{ s *session }
-
-func (f askFlag) IsBoolFlag() bool { return true }
-func (f askFlag) optionalValue()   {}
-func (f askFlag) accepts(v string) bool {
-	switch v {
-	case "true", "false", "on", "off":
-		return true
-	}
-	return false
-}
-
-func (f askFlag) String() string {
-	if f.s == nil || !f.s.askOn {
-		return "off"
-	}
-	return "on"
-}
-
-func (f askFlag) Set(v string) error {
-	s := f.s
-	s.askOn, s.askSet = true, true
-	switch v {
-	case "true", "on":
-	case "false", "off":
-		s.askOn = false
-	default:
-		return fmt.Errorf("want on or off, not %q", v)
-	}
-	return nil
-}
-
-// resolve gives the categories given bare the action of --ask (first) or
-// --deny. --deny without --ask turns the default asking off.
+// resolve gives the categories without a mode the default action: ask (for
+// a launched command), or log with --log-only, or deny with --deny-all.
 func (s *session) resolve() {
-	if s.deny && !s.askSet {
-		s.askOn = false
-	}
 	act := monitor.ActionLog
 	switch {
-	case s.askOn:
-		act = monitor.ActionAsk
-	case s.deny:
+	case s.denyAll:
 		act = monitor.ActionDeny
+	case s.askOn && !s.logOnly:
+		act = monitor.ActionAsk
 	}
 	for _, c := range []*category{&s.net, &s.files, &s.exec} {
 		if c.on && !c.explicit {
@@ -404,18 +366,30 @@ func (s *session) resolve() {
 	}
 }
 
-// bareLog makes the categories given bare log, unless --ask was given: for
-// --all, where asking is not possible. (Run then refuses an explicit ask.)
-func (s *session) bareLog() {
-	if !s.askSet {
-		s.askOn = false
-		s.resolve()
+// bareAsk reports whether a category is asked about only by default.
+func (s *session) bareAsk() bool {
+	for _, c := range []*category{&s.net, &s.files, &s.exec} {
+		if c.on && !c.explicit && c.act == monitor.ActionAsk {
+			return true
+		}
 	}
+	return false
+}
+
+// bareLog makes the categories without a mode log: for --all, where asking
+// is not possible. (Run then refuses an explicit ask.)
+func (s *session) bareLog() {
+	s.askOn = false
+	s.resolve()
 }
 
 // parse parses args into fs (see parseFlags), then checks --user.
 func (s *session) parse(fs *flag.FlagSet, args []string) {
 	parseFlags(fs, args)
+	if s.denyAll && s.logOnly {
+		fmt.Fprintln(os.Stderr, "secwrap: --deny-all and --log-only conflict: pick one")
+		os.Exit(2)
+	}
 	s.resolve()
 	// Files and exec are watched by default only where the kernel can (the
 	// BPF LSM); without it, watch the rest rather than refuse to start.
@@ -425,14 +399,14 @@ func (s *session) parse(fs *flag.FlagSet, args []string) {
 		for _, c := range []struct {
 			name string
 			cat  *category
-		}{{"filesystem", &s.files}, {"exec", &s.exec}} {
+		}{{"fs", &s.files}, {"exec", &s.exec}} {
 			if c.cat.on && !flagGiven(args, c.name) {
 				c.cat.on = false
 				dropped = append(dropped, c.name)
 			}
 		}
 		if len(dropped) > 0 {
-			fmt.Fprintf(os.Stderr, "secwrap: %s unavailable (%s): not watched\n", strings.Join(dropped, " and "), why)
+			fmt.Fprintf(os.Stderr, "secwrap: --%s unavailable (%s): not watched\n", strings.Join(dropped, " and --"), why)
 		}
 	}
 	if err := s.resolveUser(); err != nil {
@@ -557,7 +531,7 @@ func (s *session) announce() {
 	if base != "" {
 		fmt.Fprintf(os.Stderr, "Session %s: %ss/%s/\n", id, base, id)
 	} else {
-		fmt.Fprintf(os.Stderr, "Session %s: sudo secwrap session attach %s\n", id, id)
+		fmt.Fprintf(os.Stderr, "Session %s: sudo secwrap sessions attach %s\n", id, id)
 	}
 }
 

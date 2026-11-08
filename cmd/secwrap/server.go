@@ -226,7 +226,7 @@ func (h *webHost) try() {
 	ln, actual, err := listenFrom(h.addr, tries)
 	if err != nil {
 		if !h.warned {
-			fmt.Fprintf(os.Stderr, "secwrap: web page: %v (secwrap session attach still answers)\n", err)
+			fmt.Fprintf(os.Stderr, "secwrap: web page: %v (secwrap sessions attach still answers)\n", err)
 			h.warned = true
 		}
 		lock.Close()
@@ -382,7 +382,7 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut)
 .alive{color:var(--ok);background:var(--ok-bg)}.dead{color:var(--dead);background:var(--dead-bg)}
 @media (max-width:640px){.hide-sm{display:none}}
 </style></head><body>
-<h1>secwrap: sessions</h1><p>{{.Alive}} alive, {{.Dead}} dead. Served by secwrap pid {{.PID}}; <code>secwrap session</code> chooses what is shown.</p>
+<h1>secwrap: sessions</h1><p>{{.Alive}} alive, {{.Dead}} dead. Served by secwrap pid {{.PID}}; <code>secwrap sessions</code> chooses what is shown.</p>
 {{if .Rows}}<table><tr><th>Session</th><th>State</th><th>Waiting</th><th class="hide-sm">User</th><th class="hide-sm">Target</th></tr>
 {{range .Rows}}<tr><td><a href="s/{{.ID}}/">{{.ID}}</a></td>
 <td><span class="st {{.State}}">{{.State}}</span> <span class="mut">{{.Detail}}</span></td>
@@ -578,8 +578,8 @@ func serveSBOM(rw http.ResponseWriter, r *http.Request, v sessionView) {
 	rw.Write(data)
 }
 
-// secwrap session: the terminal UI. It serves no page: the secwraps that
-// run sessions do.
+// secwrap sessions: the terminal UI. While it runs it also serves the web
+// page, if no other secwrap does (and it may: root).
 
 func sessionUI() error {
 	if !isTerminal(os.Stdin) {
@@ -692,6 +692,8 @@ func runTUI() error {
 	if err != nil {
 		return err
 	}
+	web := startWebHost(defaultWebAddr, true) // stands by while another secwrap serves it
+	defer web.close()
 	t.setRaw()
 	defer t.setCooked()
 	sig := make(chan os.Signal, 1)
@@ -807,14 +809,21 @@ func render(st tuiState, sel int, msg, confirm string) {
 	}
 	fmt.Fprintf(&b, "%ssecwrap sessions%s  %d alive, %d dead\n", ansiBold, ansiReset, alive, len(st.list)-alive)
 	for _, w := range st.webs {
-		if w.Base != "" {
+		switch {
+		case w.Base != "" && w.PID == os.Getpid():
+			fmt.Fprintf(&b, "web: %s  (served here)\n", w.Base)
+		case w.Base != "":
 			fmt.Fprintf(&b, "web: %s  (served by pid %d)\n", w.Base, w.PID)
-		} else {
+		default:
 			fmt.Fprintf(&b, "web: %s served by pid %d (run as root to see its URL)\n", w.Addr, w.PID)
 		}
 	}
 	if len(st.webs) == 0 {
-		fmt.Fprintf(&b, "web: off (every secwrap running a session serves it, unless --no-web)\n")
+		if os.Geteuid() == 0 {
+			fmt.Fprintf(&b, "web: off (%s can't be served: see secwrap's messages)\n", defaultWebAddr)
+		} else {
+			fmt.Fprintf(&b, "web: off (run as root to serve it from here)\n")
+		}
 	}
 	fmt.Fprintf(&b, "%s↑/↓ select · Enter attach · w on/off the web page (W: all) · d delete (dead) · q quit%s\n\n", ansiDim, ansiReset)
 	if len(st.list) == 0 {

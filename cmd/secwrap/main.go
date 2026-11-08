@@ -39,7 +39,7 @@ func main() {
 	}
 	cmds := map[string]func([]string) error{
 		"sbom": cmdSBOM, "monitor": cmdMonitor, "run": cmdRun, "attach": cmdAttach, "shell": cmdShell,
-		"session": cmdSession, "cap": cmdCap,
+		"sessions": cmdSession, "cap": cmdCap,
 	}
 	name := ""
 	if len(os.Args) > 1 {
@@ -71,17 +71,19 @@ func usage() {
   secwrap run     [flags] -- CMD ...            SBOM + monitor; endpoints become CycloneDX services
   secwrap attach  [flags] (PID... | --name N)   monitor running processes and their children
   secwrap shell   [flags] [-- SHELL ...]        shell where everything you run is monitored
-  secwrap session                              sessions alive and dead in a terminal UI: attach, delete
+  secwrap sessions                              sessions alive and dead in a terminal UI: attach, delete
   secwrap cap                                  what this kernel supports: network, filesystem, exec, sbom
-  secwrap session list | attach [ID] | delete ID  list; answer one's questions here (root); delete dead ones
+  secwrap sessions list | attach [ID] | delete ID
+                                               list; answer one's questions here (root); delete dead ones
 
-What to watch, and what to do with each: off, log, ask or deny; bare, ask (shell: --net --filesystem):
+What to watch, and what to do with each: off, log, ask or deny; bare, ask (shell: --net --fs):
   --net [MODE]          network: TCP connect/accept, UDP sends
-  --filesystem [MODE]   file opens (BPF LSM); deny/ask: writes and sensitive reads
+  --fs [MODE]           file opens (BPF LSM); deny/ask: writes and sensitive reads
   --exec [MODE]         programs executed (BPF LSM); deny/ask: every exec but CMD
   --sbom [DIR]          a CycloneDX SBOM in DIR (default: the history folder) for every binary executed
-  --deny, --ask=off     categories given bare are denied, or logged (default: ask; attach and --all: log)
-  --no-inline           don't ask in the terminal (the web page and secwrap session attach always can)
+  --deny-all            categories without a mode are denied (default: ask; attach and --all: log)
+  --log-only            categories without a mode are logged, nothing is asked (scripts, CI)
+  --no-inline           don't ask in the terminal (the web page and secwrap sessions attach always can)
   --web-addr ADDR       serve every session's web page at ADDR (default 127.0.0.1:9000; 9000, :9000, 0.0.0.0:9100)
                         unless a secwrap already serves that address; one host per address, all show every session
   --no-web              don't serve it
@@ -193,7 +195,7 @@ func cmdAttach(args []string) error {
 	fs := flag.NewFlagSet("attach", flag.ExitOnError)
 	s := newSession(fs, false)
 	name := fs.String("name", "", "attach to every process with this name (comm or executable basename)")
-	allowAsk := fs.Bool("allow-ask", false, "allow ask mode (--net/--filesystem/--exec ask) on attach; the attached\n"+
+	allowAsk := fs.Bool("allow-ask", false, "allow ask mode (--net/--fs/--exec ask) on attach; the attached\n"+
 		"processes are left unable to gain privileges afterwards (sudo, setuid)")
 	duration := fs.Duration("duration", 0, "stop after this long, e.g. 30s, 5m (default: until the processes exit or Ctrl-C)")
 	out := fs.String("o", "", "write the JSON report to FILE ('-' for stdout)")

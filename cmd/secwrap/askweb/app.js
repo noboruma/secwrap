@@ -134,7 +134,7 @@ async function poll() {
     if (!res.ok) throw new Error(res.status);
     const text = await res.text();
     $("status").textContent = alive === false
-      ? "This session is dead: nothing left to answer. Its record stays until deleted (secwrap session)."
+      ? "This session is dead: nothing left to answer. Its record stays until deleted (secwrap sessions)."
       : "Live: updates every second.";
     $("status").className = "status";
     if (text !== lastJSON) {

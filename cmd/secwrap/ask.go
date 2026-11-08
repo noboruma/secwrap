@@ -1,7 +1,7 @@
 package main
 
 // A question as the session files, the web page and the prompts show it,
-// the prompt that inline questions and secwrap session attach share, and
+// the prompt that inline questions and secwrap sessions attach share, and
 // the terminal asker.
 
 import (
@@ -140,7 +140,7 @@ const (
 )
 
 // prompt asks it on w until a valid answer, reading lines with read.
-// quitHint adds "q = detach" to the help (secwrap session attach).
+// quitHint adds "q = detach" to the help (secwrap sessions attach).
 func prompt(w io.Writer, it webItem, read func() (string, readResult), quitHint bool) (*answerFile, readResult) {
 	yes, no := true, false
 	help := "Enter = no"
@@ -156,7 +156,7 @@ func prompt(w io.Writer, it webItem, read func() (string, readResult), quitHint 
 			fmt.Fprintf(w, "\n[ask%s] Allow %s (pid %d) to %s %s? [y/N/f]  (f = every %s under a folder) ",
 				num, it.Comm, it.PID, it.verb(), it.what(), it.Access)
 		} else {
-			fmt.Fprintf(w, "\n[ask%s] Allow %s (pid %d) %s %s to %s? [y/N]  (Y = any port on this IP, D = never this IP) ",
+			fmt.Fprintf(w, "\n[ask%s] Allow %s (pid %d) %s %s to %s? [y/N/a/d/?] ",
 				num, it.Comm, it.PID, orQ(it.Proto), it.Kind, it.Remote)
 		}
 		line, r := read()
@@ -177,15 +177,18 @@ func prompt(w io.Writer, it webItem, read func() (string, readResult), quitHint 
 				return &answerFile{Allow: &yes, Dir: dir}, gotLine
 			}
 			continue // asked again
-		case !it.isFile() && line == "Y":
+		case !it.isFile() && line == "a":
 			return &answerFile{Allow: &yes, Host: true}, gotLine
-		case !it.isFile() && line == "D":
+		case !it.isFile() && line == "d":
 			return &answerFile{Allow: &no, Host: true}, gotLine
+		case !it.isFile() && line == "?":
+			fmt.Fprintf(w, "      y: allow, n: deny, a: allow this IP, d: disallow this IP (%s)\n", help)
+			continue
 		}
 		if it.isFile() {
 			fmt.Fprintf(w, "      answer y, n or f (%s)\n", help)
 		} else {
-			fmt.Fprintf(w, "      answer y, n, Y or D (%s)\n", help)
+			fmt.Fprintf(w, "      answer y, n, a or d (? for help)\n")
 		}
 	}
 }
@@ -318,7 +321,7 @@ func (t *ttyAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.AskAns
 	t.once.Do(t.open)
 	if t.err != nil { // the web page and attach still answer
 		t.warnOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "secwrap: no terminal for inline questions (%v); answer on the web page or with secwrap session attach\n", t.err)
+			fmt.Fprintf(os.Stderr, "secwrap: no terminal for inline questions (%v); answer on the web page or with secwrap sessions attach\n", t.err)
 		})
 		<-ctx.Done()
 		return deny
@@ -328,7 +331,7 @@ func (t *ttyAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.AskAns
 	// when its cgroup still couldn't be set up.
 	if r.Freeze == nil {
 		t.warnOnce.Do(func() {
-			fmt.Fprintln(os.Stderr, "secwrap: can't freeze the command for inline questions; answer on the web page or with secwrap session attach")
+			fmt.Fprintln(os.Stderr, "secwrap: can't freeze the command for inline questions; answer on the web page or with secwrap sessions attach")
 		})
 		<-ctx.Done()
 		return deny
@@ -370,7 +373,7 @@ func (t *ttyAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.AskAns
 			case monitor.ErrCoveredByRule:
 				fmt.Fprintln(t.tty, "\n      (allowed by a folder rule)")
 			case errAnsweredElsewhere:
-				fmt.Fprintln(t.tty, "\n      (answered from secwrap session or its web page)")
+				fmt.Fprintln(t.tty, "\n      (answered from secwrap sessions or its web page)")
 			default:
 				fmt.Fprintln(t.tty, "\n      (process gone, question dropped)")
 			}

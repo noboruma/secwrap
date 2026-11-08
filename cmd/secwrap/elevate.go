@@ -37,7 +37,8 @@ var elevated bool
 // root side never got to read it (wrong password, sudo refused).
 const envCleanupArg = "__secwrap-env-cleanup"
 
-// needsRoot: the subcommands that load eBPF or answer questions (not their -h).
+// needsRoot: the subcommands that load eBPF, answer questions or serve the
+// web page (not their -h).
 func needsRoot(args []string) bool {
 	if len(args) == 0 {
 		return false
@@ -53,11 +54,16 @@ func needsRoot(args []string) bool {
 	switch args[0] {
 	case "monitor", "run", "attach", "shell":
 		return true
-	case "session":
-		return len(args) > 1 && (args[1] == "attach" || args[1] == "delete")
+	case "sessions":
+		if len(args) == 1 {
+			return stdinTTY() // the terminal UI; without a terminal it only lists
+		}
+		return args[1] == "attach" || args[1] == "delete"
 	}
 	return false
 }
+
+var stdinTTY = func() bool { return isTerminal(os.Stdin) } // tests
 
 // elevate re-runs secwrap through sudo when args need root and we are not.
 // It only returns on error, or when nothing needs doing.
@@ -78,7 +84,11 @@ func elevate(args []string) error {
 		return fmt.Errorf("save the environment for sudo: %w", err)
 	}
 	startEnvCleaner(self, envFile)
-	fmt.Fprintln(os.Stderr, "secwrap: needs root to load eBPF; asking sudo (the command still runs as you)")
+	if args[0] == "sessions" {
+		fmt.Fprintln(os.Stderr, "secwrap: needs root to answer questions and serve the web page; asking sudo")
+	} else {
+		fmt.Fprintln(os.Stderr, "secwrap: needs root to load eBPF; asking sudo (the command still runs as you)")
+	}
 	argv := append([]string{"sudo", "--", self, invokerEnvArg, envFile}, args...)
 	err = syscall.Exec(sudo, argv, os.Environ())
 	os.Remove(envFile)

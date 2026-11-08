@@ -73,11 +73,11 @@ type Report struct {
 	ExitCode  *int       `json:"exitCode,omitempty"`
 	Attached  []int      `json:"attachedPids,omitempty"`
 	Endpoints []Endpoint `json:"endpoints,omitempty"`
-	// Network blocked (--net with --deny/--ask).
+	// Network blocked (--net in deny/ask mode).
 	Denied         bool   `json:"denied,omitempty"`
 	DroppedEgress  uint64 `json:"droppedEgressPackets,omitempty"`
 	DroppedIngress uint64 `json:"droppedIngressPackets,omitempty"`
-	// --filesystem: every path opened, and the sensitive paths used.
+	// --fs: every path opened, and the sensitive paths used.
 	Files          []FileAccess `json:"files,omitempty"`
 	SensitivePaths []string     `json:"sensitivePaths,omitempty"`
 	// --exec: every program executed.
@@ -326,7 +326,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 func (o *Options) Validate() error {
 	switch {
 	case !o.Net && !o.Files && !o.Exec && o.OnBinary == nil:
-		return errors.New("choose what to monitor: --net, --filesystem, --exec and/or --sbom")
+		return errors.New("choose what to monitor: --net, --fs, --exec and/or --sbom")
 	case len(o.Command) == 0 && len(o.PIDs) == 0 && !o.All:
 		return errors.New("nothing to monitor: give a command, PIDs or --all")
 	case o.Asks() && o.All:
@@ -338,9 +338,9 @@ func (o *Options) Validate() error {
 	case o.Asks() && o.Ask == nil:
 		return errors.New("a category is asked about but Options.Ask is nil")
 	case len(o.Allow) > 0 && !o.enforcesFiles() && !o.enforcesExec():
-		return errors.New("--allow needs --filesystem or --exec set to deny or ask")
+		return errors.New("--allow needs --fs or --exec set to deny or ask")
 	case o.enforcing() && o.All:
-		return errors.New("--deny/--ask cannot be combined with --all (it would apply to the whole host)")
+		return errors.New("deny and ask cannot be combined with --all (it would apply to the whole host)")
 	}
 	return nil
 }
@@ -636,7 +636,7 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 	}
 	cmd.SysProcAttr = attr
 
-	// --exec with --deny/--ask: the launched command may run, and so may
+	// --exec in deny/ask mode: the launched command may run, and so may
 	// secwrap's own ask helper, until it has exec'd the target.
 	helperRule := ""
 	if opts.enforcesExec() && cfg.files != nil {

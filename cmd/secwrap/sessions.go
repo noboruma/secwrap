@@ -1,7 +1,7 @@
 package main
 
 // Sessions: every monitoring session registers itself in a folder, and its
-// questions (--ask) are answered through files there, so another secwrap
+// questions (ask mode) are answered through files there, so another secwrap
 // (session attach, the --web page) can answer them without a connection to it:
 //
 //	/var/lib/secwrap/sessions/<id>/   root:invoker 0750
@@ -283,7 +283,7 @@ func (a *sessionAsker) ask(ctx context.Context, r monitor.AskRequest) monitor.As
 			}
 		}()
 	} else {
-		fmt.Fprintf(os.Stderr, "[ask] #%d pid=%d %s %s: waiting (secwrap session attach %s)\n",
+		fmt.Fprintf(os.Stderr, "[ask] #%d pid=%d %s %s: waiting (secwrap sessions attach %s)\n",
 			p.ID, r.PID, r.Comm, p.describe(), a.ls.info.ID)
 	}
 
@@ -556,9 +556,9 @@ func findSession(arg string) (sessionView, error) {
 		case 1:
 			return asking[0], nil
 		case 0:
-			return sessionView{}, errors.New("no alive session asks questions (secwrap session list)")
+			return sessionView{}, errors.New("no alive session asks questions (secwrap sessions list)")
 		}
-		return sessionView{}, errors.New("several sessions ask questions: name one (secwrap session list)")
+		return sessionView{}, errors.New("several sessions ask questions: name one (secwrap sessions list)")
 	}
 	if n, err := strconv.Atoi(arg); err == nil && n >= 1 && n <= len(list) && len(arg) < 6 {
 		return list[n-1], nil
@@ -576,7 +576,7 @@ func findSession(arg string) (sessionView, error) {
 	case 1:
 		return match[0], nil
 	case 0:
-		return sessionView{}, fmt.Errorf("no session %q (secwrap session list)", arg)
+		return sessionView{}, fmt.Errorf("no session %q (secwrap sessions list)", arg)
 	}
 	return sessionView{}, fmt.Errorf("%q matches %d sessions: be more precise", arg, len(match))
 }

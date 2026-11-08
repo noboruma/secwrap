@@ -6,7 +6,7 @@ SW=${1:?path to secwrap}
 export HOME=/run/secwrap-home # /root is not readable through the share
 mkdir -p "$HOME"
 D=$(mktemp -d -p /run) U=swtest-$$ PORT=18080
-ONLY="--filesystem=off --exec=off" # every category is asked about by default
+ONLY="--fs=off --exec=off" # every category is asked about by default
 pass=0 fail=0 SWPID= LPID=
 ok() { echo "PASS  $*"; pass=$((pass + 1)); }
 bad() { echo "FAIL  $*"; fail=$((fail + 1)); }
@@ -183,7 +183,7 @@ grep -qx BLOCKED $D/cmd.out && ok "command's connect blocked" || bad "command ou
 echo "== launched command with ask: its freeze cgroup"
 # No exec and no network: nothing is asked, but the command still runs in
 # the cgroup that would be frozen during a question.
-timeout 30 $SW monitor --exec=ask --net=off --filesystem=off --no-web --log off -- /bin/bash -c 'read l < /proc/self/cgroup; echo "CG=${l#0::}"' >$D/ask.out 2>&1
+timeout 30 $SW monitor --exec=ask --net=off --fs=off --no-web --log off -- /bin/bash -c 'read l < /proc/self/cgroup; echo "CG=${l#0::}"' >$D/ask.out 2>&1
 CMDCG=$(sed -n 's/^CG=//p' $D/ask.out)
 case "$CMDCG" in
 "$OWN"/secwrap-ask-*) ok "command ran in a child of secwrap's own cgroup" ;;
@@ -200,8 +200,8 @@ grep -q '^NETWORK: *ASK' $D/defaults.out && grep -q '^FILESYSTEM: *ASK' $D/defau
 	bad "defaults: rc=$rc: $(head -n6 $D/defaults.out)"
 
 echo "== other modes run and clean up"
-for m in "--net=off --filesystem=log --exec=log" "--filesystem=deny --exec=deny --net=deny" \
-	"--net=log --filesystem=log --exec=log --sbom $D/sbom"; do
+for m in "--net=off --fs=log --exec=log" "--fs=deny --exec=deny --net=deny" \
+	"--net=log --fs=log --exec=log --sbom $D/sbom"; do
 	timeout 30 $SW monitor $m --no-web --log off -- /bin/sh -c 'ls / >/dev/null; cat /etc/hostname >/dev/null; true' >$D/mode.out 2>&1
 	rc=$?
 	if [ $rc -eq 0 ] && ! grep -qi 'panic\|goroutine' $D/mode.out; then

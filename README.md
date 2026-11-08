@@ -8,7 +8,7 @@ By default `secwrap` **asks** you before allowing each one; you can **log** or *
 | Access | Flag | What it covers | `log` | `ask` | `deny` |
 | --- | --- | --- | --- | --- | --- |
 | Network | `--net` | TCP connections, UDP sends (DNS, QUIC) | records every connection | asks for each new IP:port | blocks all network access |
-| Files | `--filesystem` | Every file opened | records every open | asks for each write or sensitive read | blocks writes and sensitive reads |
+| Files | `--fs` | Every file opened | records every open | asks for each write or sensitive read | blocks writes and sensitive reads |
 | Execution | `--exec` | Every program started | records every program | asks for each new program | only the launched command may run |
 
 ![requests waiting for an answer](.github/assets/requests.png)
@@ -46,25 +46,13 @@ chmod +x secwrap
 
 ### Running as root
 
-`secwrap` needs root to load its eBPF programs. Run it as yourself: it asks `sudo` for your password once and
-re-runs itself as root. Who holds root after that:
+Run `secwrap` as yourself; that's the recommended way. It needs root only to load its eBPF programs into the kernel,
+so it asks `sudo` for your password once and keeps root for itself. The command you give it isn't raised to root: it
+runs as you, with your groups and environment. For extra safety, `--user NAME` runs the command as another,
+less trusted user.
 
-- **`secwrap` keeps root for the whole session.** It doesn't drop root after loading: the eBPF programs stop when it
-  exits, and it uses root to clean up at the end.
-- **The command drops root before it starts.** It runs as you, with your groups and your environment. In `ask` mode,
-  a small `secwrap` helper first installs the seccomp filter as root, then drops to you and starts the command.
-- **The command can still get root the normal way.** `secwrap` doesn't set `NO_NEW_PRIVS`, so `sudo` and other
-  setuid programs work, and their children stay watched in every mode: the kernel hooks follow the process tree,
-  not the user. The one exception: if `secwrap` was given only `CAP_BPF` and `CAP_PERFMON` instead of root, `ask`
-  mode has to set `NO_NEW_PRIVS` to install its filter, and `sudo` then can't raise privileges.
-
-Started as root, `sudo secwrap …` included, `secwrap` takes it that you want the command to run as root.
-
-| How `secwrap` is started | Who the command runs as |
-| --- | --- |
-| As you | You |
-| As root (`sudo secwrap`, a root login, a container entrypoint) | Root |
-| Either way, with `--user NAME` | `NAME` |
+If the command calls `sudo` itself, that still works, and what it runs stays watched. Started as root
+(`sudo secwrap …`, a container entrypoint), `secwrap` runs the command as root.
 
 ### Requirements
 
@@ -85,13 +73,13 @@ Every session runs the same check at startup and refuses what the kernel can't d
 - **Root access through `sudo`** (or running as root). `secwrap` asks for your password once, at startup. It then
   keeps root until the session ends. The command you monitor runs as you (see [Running as root](#running-as-root)).
 - `ask`, the default (and so `secwrap shell`): Linux 5.19+ with cgroup v2, to freeze the command while a question is
-  up. Older kernels can only log and deny: give the mode (`--net log`), or `--ask=off`.
+  up. Older kernels can only log and deny: give the mode (`--net log`), or `--log-only`.
 - The **BPF LSM**, for file and exec monitoring. Check that `bpf` is listed in `/sys/kernel/security/lsm` (it is by
   default on Debian 13). Otherwise add it to the kernel command line, e.g. `lsm=...,bpf`.
 - BPF LSM programs also need a 64-bit kernel whose BPF JIT has trampolines: x86_64, arm64, riscv64, s390x,
   loongarch64 or ppc64. **32-bit x86, arm and mips kernels (and mips64) can only monitor the network.**
 
-| Architecture | `--net` | `--filesystem`, `--exec`, `--sbom` |
+| Architecture | `--net` | `--fs`, `--exec`, `--sbom` |
 | --- | --- | --- |
 | amd64, arm64, riscv64, s390x, loong64, ppc64le | Yes | Yes, with the BPF LSM |
 | 386, arm, mips, mipsle, mips64, mips64le | Yes | No |
@@ -103,7 +91,7 @@ Without the BPF LSM, or on a kernel that can't run it:
 | Feature | Without the BPF LSM |
 | --- | --- |
 | `--net` (log, ask, deny) | Works: it uses cgroup and kprobe hooks, not the LSM |
-| `--filesystem`, `--exec` | Not watched by default, with a note saying why; refused at startup when given explicitly |
+| `--fs`, `--exec` | Not watched by default, with a note saying why; refused at startup when given explicitly |
 | `--sbom` | Refused at startup, with the reason |
 | Binaries and SBOMs on the web page | Not collected; the page lists no binaries |
 
@@ -117,16 +105,16 @@ keep asking:
 secwrap monitor -- ./install.sh                  # ask about connections, writes, sensitive reads and programs
 secwrap monitor --exec off -- ./install.sh       # the same, but let it run any program
 secwrap monitor --net log -- ./build.sh          # record connections, ask about the rest
-secwrap monitor --ask=off -- make                # record everything, ask nothing
-secwrap monitor --deny -- ./untrusted            # no network, no writes or sensitive reads, no other programs
-secwrap monitor --net deny --filesystem off --exec off -- curl https://example.com  # only block the network
+secwrap monitor --log-only -- make               # record everything, ask nothing
+secwrap monitor --deny-all -- ./untrusted        # no network, no writes or sensitive reads, no other programs
+secwrap monitor --net deny --fs off --exec off -- curl https://example.com  # only block the network
 secwrap shell                                    # an interactive shell that asks about network and files
 ```
 
-`--ask=off` and `--deny` change the default for every flag not given a mode. `secwrap shell` doesn't ask about
+`--log-only` and `--deny-all` change the default for every flag not given a mode. `secwrap shell` doesn't ask about
 programs unless you add `--exec`, since that would mean a question for each new command you type. `secwrap attach` and
 `secwrap monitor --all` have no launched command to ask about, so there the default is to log all three. In scripts
-and CI, where nobody is there to answer, use `--ask=off` or give modes: a question nobody answers keeps the command
+and CI, where nobody is there to answer, use `--log-only` or give modes: a question nobody answers keeps the command
 waiting.
 
 #### Which file reads are asked about
@@ -158,12 +146,13 @@ secwrap monitor --sensitive /srv/secrets --sensitive /opt/app/config.yml -- ./in
 For each question, the process waits until you answer:
 
 ```
-[ask] Allow curl (pid 4242) tcp connect to 93.184.215.14:443? [y/N]
+[ask] Allow curl (pid 4242) tcp connect to 93.184.215.14:443? [y/N/a/d/?]
 [ask] Allow python3 (pid 4242) to WRITE /home/me/project/out.txt? [y/N/f]
 [ask] Allow sh (pid 4242) to EXEC /usr/bin/curl? [y/N/f]
 ```
 
 If you deny an access, or don't answer, the call fails with `EPERM`. Press `f` to allow everything under that folder.
+For a connection, `a` allows that IP on any port and `d` refuses it from then on; `?` lists the answers.
 You can also allow folders up front with `--allow`, for example `--allow rw:./build` or `--allow x:/usr/bin`.
 
 Every question can be answered in three places at once; the first answer wins:
@@ -172,9 +161,15 @@ Every question can be answered in three places at once; the first answer wins:
 | --- | --- | --- |
 | Inline | In the terminal running the command, as shown above. The command and its children are frozen while the question is on screen, so their output doesn't get in the way. | `--no-inline` |
 | Web page | `http://127.0.0.1:9000` by default; `--web-addr ADDR` changes the address. | `--no-web` |
-| `secwrap session` | In another terminal: `secwrap session attach`, or the terminal UI. | Always on |
+| `secwrap sessions` | In another terminal: `secwrap sessions attach`, or the terminal UI. | Always on |
 
-Without a terminal, inline questions step aside and wait for the web page or `secwrap session`.
+Without a terminal, inline questions step aside and wait for the web page or `secwrap sessions`.
+
+The web page lists every session; each session's page shows what is waiting and what was already answered. Every
+running `secwrap` serves it, and so does `secwrap sessions` while it is open (it asks `sudo` for that), so the page
+stays up after the sessions end:
+
+![A session's web page: a pending write to ~/.bashrc with Yes, No and Allow folder, above the answered questions](docs/web-session.png)
 
 ## As a login shell
 
@@ -237,7 +232,7 @@ In practice this is rarely a problem — a process you attach to in order to wat
 
 > [!NOTE]
 > Pausing a running process's syscalls is not wired up in this build: `--allow-ask` is accepted and validated, but
-> `secwrap attach --filesystem ask --allow-ask` reports that ask-on-attach is unavailable rather than silently
+> `secwrap attach --fs ask --allow-ask` reports that ask-on-attach is unavailable rather than silently
 > falling back to `deny`.
 
 ## Containers
@@ -277,6 +272,11 @@ pkg:golang/golang.org/x/sys@v0.43.0
 pkg:deb/debian/libc6@2.41-12+deb13u4?arch=amd64&distro=debian-13
 ```
 
+With `--sbom`, the session's web page lists every binary that ran, with its SBOM and a **VirusTotal** link that looks
+its SHA-256 up, a quick check that a program fetched and run by a script is known and clean. Only the hash leaves the
+machine, and only when you click, from your browser. The SBOM JSON can also be fed to grype, osv-scanner or
+Dependency-Track for known vulnerabilities.
+
 `secwrap cap` reports what the running kernel supports; on the same box it prints `log ask deny` for all three of
 network, filesystem and exec, plus `sbom yes` and `pause yes`.
 
@@ -302,7 +302,7 @@ Falco) watch whole hosts and clusters, not a single command.
 for one command. It needs no root, because it uses Landlock and seccomp user notification. `secwrap` needs root to
 load its eBPF programs. Most of the differences follow from that.
 
-**Where `secwrap` is stronger**
+**Where `secwrap` is different**
 
 - **Commands that really need root.** Installers like `./install.sh` often have to write to `/usr` or `/etc`.
   `sudo secwrap monitor -- ./install.sh` runs the script as root and still stops at each write:
@@ -320,14 +320,12 @@ load its eBPF programs. Most of the differences follow from that.
 - **Attach and login shell.** `secwrap` can attach to running processes or act as a login shell. sandlock only
   launches new sandboxes.
 
-**Where sandlock is stronger**
+**Where sandlock is different**
 
-- **No root, no password, no eBPF.** It runs in locked-down CI and rootless containers.
-- **Deny by default.** Files and network are blocked unless granted. `secwrap` asks about writes and sensitive reads
-  but lets other reads through.
-- **Undo.** With a copy-on-write work directory and `--dry-run`, an installer's writes can be reviewed, then kept
-  or thrown away. In `secwrap`, a write you allow happens straight away.
-- **Extras:** resource limits, HTTP method and path rules, credential injection.
+- **No root, no password.** It runs in locked-down CI and rootless containers.
+- **Undo, in the work directory.** With a copy-on-write work directory and `--dry-run`, writes under that directory
+  can be reviewed, then kept or thrown away. Writes elsewhere (`/etc`, `~`) are allowed or refused as usual, not
+  staged. In `secwrap`, a write you allow happens straight away.
 
 Kernel floors: `secwrap` needs Linux 5.10+ with BTF, plus the BPF LSM for files and exec, and 5.19+ with cgroup v2
 for `ask`. sandlock targets Linux 6.12 (Landlock ABI v6) and can run with fewer protections on older kernels.
@@ -336,9 +334,6 @@ for `ask`. sandlock targets Linux 6.12 (Landlock ABI v6) and can run with fewer 
 
 The rules are enforced in the kernel by eBPF programs, so io_uring, static binaries and raw syscalls are covered too.
 In `ask` mode, seccomp pauses the call until you answer, and your answer is stored in a map the eBPF programs check.
-
-The eBPF code is built once per byte order (`bpfel`, `bpfeb`), not per CPU. Kernel structures are relocated at load
-time (CO-RE), and at startup `secwrap` reads where the kprobe arguments sit in `struct pt_regs` from the kernel's BTF.
 
 | File | Watches | Hooks |
 | --- | --- | --- |

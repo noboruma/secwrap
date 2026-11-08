@@ -114,7 +114,7 @@ type askConfig struct {
 	emit      func(Event)
 	emitFile  func(FileEvent)
 	deny      *denyCgroup
-	files     fileRuleSink // nil: no LSM rules (no --filesystem/--exec)
+	files     fileRuleSink // nil: no LSM rules (no --fs/--exec)
 	scope     *fileScope
 	dirAllow  map[string]uint8 // preset folder rules (already in BPF)
 	fileAllow map[string]uint8 // preset file rules (the launched command)

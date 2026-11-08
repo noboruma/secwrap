@@ -1,6 +1,6 @@
 package main
 
-// secwrap session [list | attach [ID] | delete ID...]
+// secwrap sessions [list | attach [ID] | delete ID...]
 
 import (
 	"errors"
@@ -18,7 +18,7 @@ import (
 )
 
 func cmdSession(args []string) error {
-	usage := errors.New("usage: secwrap session [list | attach [ID] | delete ID...]")
+	usage := errors.New("usage: secwrap sessions [list | attach [ID] | delete ID...]")
 	if len(args) == 0 {
 		return sessionUI()
 	}
@@ -93,7 +93,7 @@ func attachSession(v sessionView, lines <-chan string, w io.Writer) error {
 		return fmt.Errorf("%s is dead (%s)", v.ID, v.stateDetail())
 	}
 	if unix.Access(filepath.Join(v.Dir, "answers"), unix.W_OK) != nil {
-		return errors.New("answering needs root: sudo secwrap session attach")
+		return errors.New("answering needs root: sudo secwrap sessions attach")
 	}
 	fmt.Fprintf(w, "attached to %s: %s (pid %d, %s, ask: %s)\n", v.ID, v.Target, v.PID, v.userLabel(), v.askLabel())
 	if v.History != "" {
