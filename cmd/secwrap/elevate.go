@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -43,7 +44,12 @@ func needsRoot(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	for _, a := range args[1:] {
+	watch := strings.HasPrefix(args[0], "-") // secwrap [flags] -- CMD
+	rest := args[1:]
+	if watch {
+		rest = args
+	}
+	for _, a := range rest {
 		if a == "--" {
 			break
 		}
@@ -51,14 +57,19 @@ func needsRoot(args []string) bool {
 			return false
 		}
 	}
+	if watch {
+		return true
+	}
 	switch args[0] {
-	case "monitor", "run", "attach", "shell":
+	case "attach", "shell":
 		return true
 	case "sessions":
 		if len(args) == 1 {
 			return stdinTTY() // the terminal UI; without a terminal it only lists
 		}
 		return args[1] == "attach" || args[1] == "delete"
+	case "vacuum": // the session records are root's
+		return true
 	}
 	return false
 }
@@ -84,9 +95,12 @@ func elevate(args []string) error {
 		return fmt.Errorf("save the environment for sudo: %w", err)
 	}
 	startEnvCleaner(self, envFile)
-	if args[0] == "sessions" {
+	switch args[0] {
+	case "sessions":
 		fmt.Fprintln(os.Stderr, "secwrap: needs root to answer questions and serve the web page; asking sudo")
-	} else {
+	case "vacuum":
+		fmt.Fprintln(os.Stderr, "secwrap: needs root to delete session records; asking sudo")
+	default:
 		fmt.Fprintln(os.Stderr, "secwrap: needs root to load eBPF; asking sudo (the command still runs as you)")
 	}
 	argv := append([]string{"sudo", "--", self, invokerEnvArg, envFile}, args...)

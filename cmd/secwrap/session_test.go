@@ -10,34 +10,27 @@ import (
 
 func TestBareMode(t *testing.T) {
 	for _, tc := range []struct {
-		withAsk bool // monitor, run, shell (false: attach)
-		all     bool // monitor --all
+		withAsk bool // secwrap -- CMD, shell (false: attach)
 		args    string
 		net     monitor.Action
 	}{
-		{true, false, "--net", monitor.ActionAsk},
-		{true, false, "--net --deny-all", monitor.ActionDeny},
-		{true, false, "--net --log-only", monitor.ActionLog},
-		{true, false, "--net ask --log-only", monitor.ActionAsk},
-		{true, false, "--net ask --deny-all", monitor.ActionAsk},
-		{true, false, "--net log", monitor.ActionLog},
-		{true, false, "--net deny", monitor.ActionDeny},
-		{true, true, "--net", monitor.ActionLog},
-		{true, true, "--net --deny-all", monitor.ActionDeny},
-		{true, true, "--net ask", monitor.ActionAsk}, // refused later, saying why
-		{false, false, "--net", monitor.ActionLog},
-		{false, false, "--net --deny-all", monitor.ActionDeny},
-		{false, false, "--net ask", monitor.ActionAsk}, // refused later, saying why
+		{true, "--net", monitor.ActionAsk},
+		{true, "--net --deny-all", monitor.ActionDeny},
+		{true, "--net --log-only", monitor.ActionLog},
+		{true, "--net ask --log-only", monitor.ActionAsk},
+		{true, "--net ask --deny-all", monitor.ActionAsk},
+		{true, "--net log", monitor.ActionLog},
+		{true, "--net deny", monitor.ActionDeny},
+		{false, "--net", monitor.ActionLog},
+		{false, "--net --deny-all", monitor.ActionDeny},
+		{false, "--net ask", monitor.ActionAsk}, // refused later, saying why
 	} {
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		s := newSession(fs, tc.withAsk)
 		parseFlags(fs, append(strings.Fields(tc.args), "--", "true"))
 		s.resolve()
-		if tc.all {
-			s.bareLog()
-		}
 		if !s.net.on || s.net.act != tc.net {
-			t.Errorf("withAsk=%v all=%v %q: net on=%v %v, want %v", tc.withAsk, tc.all, tc.args, s.net.on, s.net.act, tc.net)
+			t.Errorf("withAsk=%v %q: net on=%v %v, want %v", tc.withAsk, tc.args, s.net.on, s.net.act, tc.net)
 		}
 	}
 }

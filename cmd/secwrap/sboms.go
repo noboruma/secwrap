@@ -186,16 +186,6 @@ func (st *sbomStore) snapshot() []binary {
 	return out
 }
 
-// get returns the binary with id, if its SBOM is ready.
-func (st *sbomStore) get(id int) (binary, bool) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if id < 1 || id > len(st.list) || st.list[id-1].File == "" {
-		return binary{}, false
-	}
-	return *st.list[id-1], true
-}
-
 // writeIndex rewrites DIR/index.json (oldest first), atomically.
 func (st *sbomStore) writeIndex() {
 	list := st.snapshot()

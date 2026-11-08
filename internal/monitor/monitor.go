@@ -84,7 +84,7 @@ type Report struct {
 	Execs []FileAccess `json:"execs,omitempty"`
 }
 
-// Options control a monitoring session. Exactly one of Command, PIDs or All
+// Options control a monitoring session. Exactly one of Command or PIDs
 // must be set, and at least one of Net, Files, Exec and OnBinary.
 type Options struct {
 	// PIDs attaches to running processes and all their descendants, those
@@ -92,7 +92,6 @@ type Options struct {
 	// tracked process has exited (or ctx ends).
 	PIDs    []int
 	Command []string
-	All     bool
 
 	// AllowAsk permits ask mode with PIDs. The attached processes are left
 	// with no_new_privs set, so they can't gain privileges afterwards.
@@ -163,8 +162,6 @@ func (a Action) String() string {
 func (o *Options) enforcesNet() bool   { return o.Net && o.NetAction != ActionLog }
 func (o *Options) enforcesFiles() bool { return o.Files && o.FilesAction != ActionLog }
 func (o *Options) enforcesExec() bool  { return o.Exec && o.ExecAction != ActionLog }
-
-func (o *Options) enforcing() bool { return o.enforcesNet() || o.enforcesFiles() || o.enforcesExec() }
 
 // Asks reports whether some watched category is asked about.
 func (o *Options) Asks() bool {
@@ -300,9 +297,6 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 			}
 		}
 		waitTreeExit(ctx, objs.Tracked)
-	default: // All
-		report.Target = "system-wide"
-		<-ctx.Done()
 	}
 
 	stopReaders()
@@ -327,10 +321,8 @@ func (o *Options) Validate() error {
 	switch {
 	case !o.Net && !o.Files && !o.Exec && o.OnBinary == nil:
 		return errors.New("choose what to monitor: --net, --fs, --exec and/or --sbom")
-	case len(o.Command) == 0 && len(o.PIDs) == 0 && !o.All:
-		return errors.New("nothing to monitor: give a command, PIDs or --all")
-	case o.Asks() && o.All:
-		return errors.New("asking cannot be combined with --all")
+	case len(o.Command) == 0 && len(o.PIDs) == 0:
+		return errors.New("nothing to monitor: give a command or PIDs")
 	case o.Asks() && len(o.Command) == 0 && !o.AllowAsk:
 		return errors.New("asking an attached process needs --allow-ask (which leaves it unable to gain privileges); otherwise launch a command")
 	case o.AllowAsk && len(o.PIDs) == 0:
@@ -339,8 +331,6 @@ func (o *Options) Validate() error {
 		return errors.New("a category is asked about but Options.Ask is nil")
 	case len(o.Allow) > 0 && !o.enforcesFiles() && !o.enforcesExec():
 		return errors.New("--allow needs --fs or --exec set to deny or ask")
-	case o.enforcing() && o.All:
-		return errors.New("deny and ask cannot be combined with --all (it would apply to the whole host)")
 	}
 	return nil
 }
@@ -368,9 +358,6 @@ func loadTrace(opts Options, blockNet bool, cleanup *closers) (*ebpf.CollectionS
 		return nil, nil, fmt.Errorf("load BPF spec: %w", err)
 	}
 	if err := spec.Variables["self_tgid"].Set(uint32(os.Getpid())); err != nil {
-		return nil, nil, err
-	}
-	if err := spec.Variables["trace_all"].Set(boolByte(opts.All)); err != nil {
 		return nil, nil, err
 	}
 	if err := setKernelRegs(spec); err != nil {
@@ -810,7 +797,7 @@ func SudoUser() *user.User {
 func (o *Options) Home() string {
 	u := o.RunAs
 	if u == nil {
-		u = SudoUser() // the sudo invoker's, even when the command runs as root, attach or --all
+		u = SudoUser() // the sudo invoker's, even when the command runs as root, or on attach
 	}
 	if u != nil && u.HomeDir != "" {
 		return u.HomeDir

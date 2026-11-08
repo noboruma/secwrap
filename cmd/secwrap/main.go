@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"os/user"
 	"strconv"
@@ -19,7 +18,6 @@ import (
 	"syscall"
 
 	"github.com/noboruma/secwrap/internal/monitor"
-	"github.com/noboruma/secwrap/internal/sbom"
 )
 
 func main() {
@@ -38,50 +36,55 @@ func main() {
 		os.Args = append(os.Args[:1], rest...)
 	}
 	cmds := map[string]func([]string) error{
-		"sbom": cmdSBOM, "monitor": cmdMonitor, "run": cmdRun, "attach": cmdAttach, "shell": cmdShell,
-		"sessions": cmdSession, "cap": cmdCap,
+		"attach": cmdAttach, "shell": cmdShell, "sessions": cmdSession, "vacuum": cmdVacuum, "cap": cmdCap,
 	}
 	name := ""
 	if len(os.Args) > 1 {
 		name = os.Args[1]
 	}
-	cmd := cmds[name]
-	if cmd == nil {
+	cmd, args := cmds[name], os.Args[min(2, len(os.Args)):]
+	switch {
+	case name == "-h" || name == "-help" || name == "--help" || name == "help":
+		fmt.Fprint(os.Stderr, usageCommands+"\n")
+		cmdRun([]string{"-h"}) // every flag; exits
+		return
+	case cmd == nil && strings.HasPrefix(name, "-"): // secwrap [flags] -- CMD
+		cmd, args = cmdRun, os.Args[1:]
+	case cmd == nil:
 		usage()
-		if name == "-h" || name == "--help" || name == "help" {
-			return
-		}
 		os.Exit(2)
 	}
 	if err := elevate(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "secwrap:", err)
 		os.Exit(1)
 	}
-	if err := cmd(os.Args[2:]); err != nil {
+	if err := cmd(args); err != nil {
 		fmt.Fprintln(os.Stderr, "secwrap:", err)
 		os.Exit(1)
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `secwrap: run a command or a shell under eBPF watch: record, block, or ask before network and file access
+func usage() { fmt.Fprint(os.Stderr, usageCommands+usageFlags) }
 
-  secwrap sbom    [-o FILE] BINARY              CycloneDX SBOM (Go, Rust, ELF shared libs + dpkg)
-  secwrap monitor [flags] (--all | -- CMD ...)  record what CMD does (root)
-  secwrap run     [flags] -- CMD ...            SBOM + monitor; endpoints become CycloneDX services
+const usageCommands = `secwrap: run a command or a shell under eBPF watch: record, block, or ask before network and file access
+
+  secwrap [flags] -- CMD ...                    run CMD and watch it and its children
   secwrap attach  [flags] (PID... | --name N)   monitor running processes and their children
   secwrap shell   [flags] [-- SHELL ...]        shell where everything you run is monitored
   secwrap sessions                              sessions alive and dead in a terminal UI: attach, delete
-  secwrap cap                                  what this kernel supports: network, filesystem, exec, sbom
+  secwrap vacuum  [--older-than 30d]            delete dead sessions' records and history older than 30 days
+  secwrap cap                                   what this kernel supports: network, filesystem, exec, sbom
   secwrap sessions list | attach [ID] | delete ID
                                                list; answer one's questions here (root); delete dead ones
+`
 
+const usageFlags = `
 What to watch, and what to do with each: off, log, ask or deny; bare, ask (shell: --net --fs):
   --net [MODE]          network: TCP connect/accept, UDP sends
   --fs [MODE]           file opens (BPF LSM); deny/ask: writes and sensitive reads
   --exec [MODE]         programs executed (BPF LSM); deny/ask: every exec but CMD
   --sbom [DIR]          a CycloneDX SBOM in DIR (default: the history folder) for every binary executed
-  --deny-all            categories without a mode are denied (default: ask; attach and --all: log)
+  --deny-all            categories without a mode are denied (default: ask; attach: log)
   --log-only            categories without a mode are logged, nothing is asked (scripts, CI)
   --no-inline           don't ask in the terminal (the web page and secwrap sessions attach always can)
   --web-addr ADDR       serve every session's web page at ADDR (default 127.0.0.1:9000; 9000, :9000, 0.0.0.0:9100)
@@ -89,9 +92,8 @@ What to watch, and what to do with each: off, log, ask or deny; bare, ask (shell
   --no-web              don't serve it
   --allow rwx:DIR       with deny/ask: allow reads/writes/execs under DIR (repeatable)
   --log FILE|off        live events to FILE (JSON lines if *.json/*.jsonl) instead of stderr
-Run "secwrap CMD -h" for all flags.
-`)
-}
+Every flag: secwrap --help; for attach and shell: secwrap attach -h, secwrap shell -h.
+`
 
 // writeJSONIn writes v as indented JSON to name inside root (no symlink
 // can lead it out), owned by the invoking user under sudo.
@@ -126,33 +128,20 @@ func writeJSON(path string, v any) error {
 	return enc.Encode(v)
 }
 
-func cmdSBOM(args []string) error {
-	fs := flag.NewFlagSet("sbom", flag.ExitOnError)
-	out := fs.String("o", "-", "output file (default stdout)")
-	fs.Parse(args)
-	if fs.NArg() != 1 {
-		return errors.New("usage: secwrap sbom [-o FILE] BINARY")
-	}
-	bom, err := sbom.Generate(fs.Arg(0))
-	if err != nil {
-		return err
-	}
-	return writeJSON(*out, bom)
-}
-
-func cmdMonitor(args []string) error {
-	fs := flag.NewFlagSet("monitor", flag.ExitOnError)
+func cmdRun(args []string) error {
+	fs := flag.NewFlagSet("secwrap", flag.ExitOnError)
 	s := newSession(fs, true)
-	all := fs.Bool("all", false, "monitor every process on the host")
 	out := fs.String("o", "", "write the JSON report to FILE ('-' for stdout)")
-	s.parse(fs, args)
-	if *all {
-		s.bareLog() // nothing to ask: no launched command
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: secwrap [flags] -- CMD [ARGS...]")
+		fs.PrintDefaults()
 	}
-
-	o := s.options(fs.Args())
-	o.All = *all
-	rep, err := s.run(signalContext(), o)
+	s.parse(fs, args)
+	if fs.NArg() == 0 {
+		fs.Usage()
+		return errors.New("no command given: secwrap [flags] -- CMD")
+	}
+	rep, err := s.run(signalContext(), s.options(fs.Args()))
 	if err != nil {
 		return err
 	}
@@ -160,33 +149,6 @@ func cmdMonitor(args []string) error {
 		if err := writeJSON(*out, rep); err != nil {
 			return err
 		}
-	}
-	return exitWith(rep)
-}
-
-func cmdRun(args []string) error {
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	s := newSession(fs, true)
-	out := fs.String("o", "-", "SBOM output file (default stdout)")
-	s.parse(fs, args)
-	if fs.NArg() == 0 {
-		return errors.New("usage: secwrap run [flags] -- CMD [ARGS...]")
-	}
-	bin, err := exec.LookPath(fs.Arg(0))
-	if err != nil {
-		return err
-	}
-	bom, err := sbom.Generate(bin)
-	if err != nil {
-		return err
-	}
-	rep, err := s.run(signalContext(), s.options(fs.Args()))
-	if err != nil {
-		return err
-	}
-	bom.Services = toServices(rep)
-	if err := writeJSON(*out, bom); err != nil {
-		return err
 	}
 	return exitWith(rep)
 }
@@ -308,29 +270,4 @@ func chownInvokerIn(root *os.Root, name string) {
 	if uid, gid, ok := invokerIDs(); ok {
 		_ = root.Lchown(name, uid, gid)
 	}
-}
-
-// toServices maps observed endpoints to CycloneDX services, one per peer.
-func toServices(rep *monitor.Report) []sbom.Service {
-	var svcs []sbom.Service
-	for i, ep := range rep.Endpoints {
-		endpoint := fmt.Sprintf("%s://%s", ep.Proto, ep.Remote)
-		if ep.Direction == monitor.Inbound {
-			endpoint = fmt.Sprintf("%s://0.0.0.0:%d", ep.Proto, ep.LocalPort)
-		}
-		svcs = append(svcs, sbom.Service{
-			BOMRef:    "service-" + strconv.Itoa(i),
-			Name:      fmt.Sprintf("%s %s %s", ep.Direction, ep.Proto, ep.Remote),
-			Endpoints: []string{endpoint},
-			Properties: []sbom.Property{
-				{Name: "secwrap:net:direction", Value: string(ep.Direction)},
-				{Name: "secwrap:net:peer", Value: ep.Remote},
-				{Name: "secwrap:net:count", Value: strconv.Itoa(ep.Count)},
-				{Name: "secwrap:net:firstSeen", Value: ep.FirstSeen.UTC().Format("2006-01-02T15:04:05.000Z")},
-				{Name: "secwrap:net:processes", Value: strings.Join(ep.Comms, ",")},
-				{Name: "secwrap:net:blocked", Value: strconv.FormatBool(ep.Blocked)},
-			},
-		})
-	}
-	return svcs
 }

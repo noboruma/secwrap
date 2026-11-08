@@ -9,7 +9,6 @@ type BOM struct {
 	Version      int          `json:"version"`
 	Metadata     Metadata     `json:"metadata"`
 	Components   []Component  `json:"components"`
-	Services     []Service    `json:"services,omitempty"`
 	Dependencies []Dependency `json:"dependencies,omitempty"`
 }
 
@@ -66,12 +65,4 @@ type Property struct {
 type Dependency struct {
 	Ref       string   `json:"ref"`
 	DependsOn []string `json:"dependsOn,omitempty"`
-}
-
-// Service describes an observed network peer (filled by `secwrap run`).
-type Service struct {
-	BOMRef     string     `json:"bom-ref,omitempty"`
-	Name       string     `json:"name"`
-	Endpoints  []string   `json:"endpoints,omitempty"`
-	Properties []Property `json:"properties,omitempty"`
 }
