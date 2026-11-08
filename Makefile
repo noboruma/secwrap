@@ -4,7 +4,7 @@ BIN := secwrap
 # built once per byte order (bpfel, bpfeb), not per CPU.
 ARCHES := amd64 386 arm64 arm mips mipsle mips64 mips64le riscv64 ppc64le s390x loong64
 
-.PHONY: all generate build dist vmlinux clean
+.PHONY: all generate build dist vmlinux vmtest clean
 
 all: build
 
@@ -29,6 +29,11 @@ dist: generate
 			go build -trimpath -ldflags "-s -w" -o dist/$(BIN)-linux-$$a ./cmd/secwrap || exit 1; \
 		(cd dist && sha256sum $(BIN)-linux-$$a > $(BIN)-linux-$$a.sha256) || exit 1; \
 	done
+
+# End-to-end tests as root in a throwaway QEMU VM booting the host kernel; no
+# root needed on the host (see test/vm/run.sh).
+vmtest: build
+	test/vm/run.sh $(BIN)
 
 clean:
 	rm -rf $(BIN) dist internal/monitor/secwrap_bpfe[lb].*

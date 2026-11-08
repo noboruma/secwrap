@@ -190,7 +190,8 @@ func cmdAttach(args []string) error {
 	fs := flag.NewFlagSet("attach", flag.ExitOnError)
 	s := newSession(fs, false)
 	name := fs.String("name", "", "attach to every process with this name (comm or executable basename)")
-	children := fs.Bool("children", true, "also follow child processes that are already running")
+	allowAsk := fs.Bool("allow-ask", false, "allow ask mode (--net/--filesystem/--exec ask) on attach; the attached\n"+
+		"processes are left unable to gain privileges afterwards (sudo, setuid)")
 	duration := fs.Duration("duration", 0, "stop after this long, e.g. 30s, 5m (default: until the processes exit or Ctrl-C)")
 	out := fs.String("o", "", "write the JSON report to FILE ('-' for stdout)")
 	fs.Usage = func() {
@@ -231,11 +232,19 @@ func cmdAttach(args []string) error {
 		defer cancel()
 	}
 	o := s.options(nil)
-	o.PIDs, o.FollowExisting = pids, *children
+	o.PIDs, o.AllowAsk = pids, *allowAsk
 	if err := o.Validate(); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "secwrap: attaching to %v (children=%v); Ctrl-C to stop\n", pids, *children)
+	if o.Asks() {
+		// Ask on attach needs a seccomp listener for each running process;
+		// installing one into a process secwrap did not launch isn't wired
+		// up here yet. The flag, validation and supervisor are in place so
+		// a caller that can supply listeners (Options.AskListeners) gets a
+		// working ask-on-attach.
+		return errors.New("secwrap attach: ask mode on attach is not available in this build (--allow-ask is accepted, but pausing a running process's syscalls is not yet implemented)")
+	}
+	fmt.Fprintf(os.Stderr, "secwrap: attaching to %v and their children; Ctrl-C to stop\n", pids)
 	rep, err := s.run(ctx, o)
 	if err != nil {
 		return err

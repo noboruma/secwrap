@@ -17,7 +17,9 @@ import (
 // seccompWaitKillableRecv), so being frozen doesn't withdraw the question.
 
 // plainCgroup is a cgroup v2 for the launched command when there is no
-// deny cgroup to freeze.
+// deny cgroup to freeze. Like the deny cgroups it is a child of secwrap's
+// own cgroup, so the limits secwrap runs under keep applying, with one at
+// the root as the fallback.
 type plainCgroup struct {
 	path string
 	dir  *os.File
@@ -27,17 +29,25 @@ func newPlainCgroup() (*plainCgroup, error) {
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
 		return nil, fmt.Errorf("freezing on inline questions needs cgroup v2 mounted at %s", cgroupRoot)
 	}
-	c := &plainCgroup{path: filepath.Join(cgroupRoot, fmt.Sprintf("secwrap-ask-%d", os.Getpid()))}
-	if err := os.Mkdir(c.path, 0o755); err != nil {
-		return nil, fmt.Errorf("create cgroup: %w", err)
+	name := fmt.Sprintf("secwrap-ask-%d", os.Getpid())
+	parents := []string{cgroupRoot}
+	if own, err := cgroupOf(os.Getpid()); err == nil && own != cgroupRoot {
+		parents = []string{own, cgroupRoot}
 	}
-	dir, err := os.Open(c.path)
-	if err != nil {
-		os.Remove(c.path)
-		return nil, err
+	var err error
+	for _, parent := range parents {
+		c := &plainCgroup{path: filepath.Join(parent, name)}
+		if err = os.Mkdir(c.path, 0o755); err != nil {
+			err = fmt.Errorf("create cgroup: %w", err)
+			continue
+		}
+		if c.dir, err = os.Open(c.path); err != nil {
+			os.Remove(c.path)
+			continue
+		}
+		return c, nil
 	}
-	c.dir = dir
-	return c, nil
+	return nil, err
 }
 
 func (c *plainCgroup) FD() int { return int(c.dir.Fd()) }

@@ -1,6 +1,6 @@
 //go:build ignore
 
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 // Program execution (BPF LSM, needs "bpf" in /sys/kernel/security/lsm).
 
 #include "common.bpf.h"

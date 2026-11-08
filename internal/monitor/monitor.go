@@ -87,13 +87,27 @@ type Report struct {
 // Options control a monitoring session. Exactly one of Command, PIDs or All
 // must be set, and at least one of Net, Files, Exec and OnBinary.
 type Options struct {
-	// PIDs attaches to running processes. Their future children are always
-	// followed; already-running descendants too when FollowExisting is set.
-	// The session ends when every tracked process has exited (or ctx ends).
-	PIDs           []int
-	FollowExisting bool
-	Command        []string
-	All            bool
+	// PIDs attaches to running processes and all their descendants, those
+	// already running and those started later. The session ends when every
+	// tracked process has exited (or ctx ends).
+	PIDs    []int
+	Command []string
+	All     bool
+
+	// AllowAsk permits ask mode when attaching to running processes (PIDs
+	// set), which otherwise needs a command secwrap launches so it can
+	// install the seccomp filter before exec. The seccomp notification
+	// listeners for the already-running processes are supplied through
+	// AskListeners. Those processes keep no_new_privs set, so they cannot
+	// gain privileges (sudo, setuid) afterwards; see secwrap attach
+	// --allow-ask.
+	AllowAsk bool
+	// AskListeners are seccomp notification listener fds, one per attached
+	// process, used when AllowAsk is set. Run takes ownership of each fd and
+	// closes it when the session ends. Producing them (pausing a running
+	// process's syscalls) is the caller's responsibility; the CLI has no
+	// source for them yet, so secwrap attach --allow-ask reports that.
+	AskListeners []int
 
 	// What to watch.
 	Net   bool // TCP connect/accept, UDP sends
@@ -264,9 +278,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		return nil, err
 	}
 
-	switch {
-	case len(opts.Command) > 0:
-		report.Target = fmt.Sprint(opts.Command)
+	newAskConfig := func() askConfig {
 		cfg := askConfig{ask: opts.Ask, emit: emit, emitFile: emitFile, deny: deny, scope: scope, dirAllow: dirAllow,
 			net:   opts.Net && opts.NetAction == ActionAsk,
 			opens: opts.Files && opts.FilesAction == ActionAsk,
@@ -274,7 +286,13 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		if files != nil {
 			cfg.files = files // not a nil *fileObjects in a non-nil interface
 		}
-		code, err := runCommand(ctx, opts, objs.Tracked, cfg)
+		return cfg
+	}
+
+	switch {
+	case len(opts.Command) > 0:
+		report.Target = fmt.Sprint(opts.Command)
+		code, err := runCommand(ctx, opts, objs.Tracked, newAskConfig())
 		if err != nil {
 			stopReaders()
 			return nil, err
@@ -292,6 +310,17 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 			strs[i] = strconv.Itoa(p)
 		}
 		report.Target, report.Attached = "pid "+strings.Join(strs, ","), pids
+		if opts.Asks() {
+			if len(opts.AskListeners) == 0 {
+				stopReaders()
+				return nil, errors.New("ask mode on attach needs a seccomp listener for each process; none were supplied")
+			}
+			cfg := newAskConfig()
+			for _, lfd := range opts.AskListeners {
+				stop := superviseAsk(lfd, cfg)
+				defer stop()
+			}
+		}
 		waitTreeExit(ctx, objs.Tracked)
 	default: // All
 		report.Target = "system-wide"
@@ -322,8 +351,12 @@ func (o *Options) Validate() error {
 		return errors.New("choose what to monitor: --net, --filesystem, --exec and/or --sbom")
 	case len(o.Command) == 0 && len(o.PIDs) == 0 && !o.All:
 		return errors.New("nothing to monitor: give a command, PIDs or --all")
-	case o.Asks() && len(o.Command) == 0:
-		return errors.New("asking only works with a launched command (not --all or attach)")
+	case o.Asks() && o.All:
+		return errors.New("asking cannot be combined with --all")
+	case o.Asks() && len(o.Command) == 0 && !o.AllowAsk:
+		return errors.New("asking an attached process needs --allow-ask (which leaves it unable to gain privileges); otherwise launch a command")
+	case o.AllowAsk && len(o.PIDs) == 0:
+		return errors.New("--allow-ask only applies when attaching to running processes")
 	case o.Asks() && o.Ask == nil:
 		return errors.New("a category is asked about but Options.Ask is nil")
 	case len(o.Allow) > 0 && !o.enforcesFiles() && !o.enforcesExec():
@@ -341,10 +374,14 @@ func (c *closers) add(f func()) { *c = append(*c, f) }
 
 func (c *closers) addLink(l link.Link) { c.add(func() { l.Close() }) }
 
-func (c closers) close() {
-	for i := len(c) - 1; i >= 0; i-- {
-		c[i]()
+// close runs the closers in reverse order. Pointer receiver: with a value
+// one, "defer cleanup.close()" would copy the (still empty) slice at the
+// defer statement and never run anything added later.
+func (c *closers) close() {
+	for i := len(*c) - 1; i >= 0; i-- {
+		(*c)[i]()
 	}
+	*c = nil
 }
 
 // loadTrace loads the BPF spec and the tracing programs, and attaches them.
@@ -437,28 +474,67 @@ func startReaders(objs *traceObjects, files *fileObjects, emit func(Event), emit
 	return stop, nil
 }
 
-// attachPIDs tracks running processes (and their descendants with
-// FollowExisting), moving them into the deny cgroup in deny mode.
+// attachPIDs tracks running processes and all their descendants, moving
+// them into the deny cgroup in deny mode. It returns the processes it
+// attached.
+//
+// The fork tracepoint is already live, so each process is put in the map
+// before its children are looked for: a child forked after that is added
+// by the tracepoint, one forked before shows up in /proc on the next pass.
+// The cgroup move works the same way (a child forked after it inherits the
+// cgroup; one forked before is tracked and moved on the next pass), so we
+// repeat until a pass finds nothing new.
 func attachPIDs(opts Options, tracked *ebpf.Map, deny *denyCgroup) ([]int, error) {
-	pids := opts.PIDs
-	if opts.FollowExisting {
-		pids = WithDescendants(pids)
+	// The BPF side keys on tgids: a thread id given here would never be
+	// matched, nor removed on exit.
+	var roots []int
+	for _, p := range opts.PIDs {
+		roots = append(roots, tgidOf(p))
 	}
-	for _, p := range pids {
-		if err := tracked.Put(uint32(p), uint8(1)); err != nil {
-			return nil, fmt.Errorf("track pid %d: %w", p, err)
-		}
-		if deny != nil {
-			if err := deny.addPID(p); err != nil {
-				return nil, err
+	done := map[int]bool{}
+	var attached []int
+	for {
+		progress := false
+		for _, p := range append(WithDescendants(roots), trackedPIDs(tracked)...) {
+			if done[p] {
+				continue
 			}
+			done[p] = true
+			if err := tracked.Put(uint32(p), uint8(1)); err != nil {
+				return nil, fmt.Errorf("track pid %d: %w", p, err)
+			}
+			// Exited before it was in the map: the exit tracepoint has
+			// already fired and would never remove it.
+			if !procAlive(p) {
+				_ = tracked.Delete(uint32(p))
+				continue
+			}
+			if deny != nil {
+				if err := deny.addPID(p); err != nil {
+					if !procAlive(p) {
+						continue
+					}
+					return nil, err
+				}
+			}
+			attached = append(attached, p)
+			progress = true
+		}
+		if !progress {
+			break
 		}
 	}
-	return pids, nil
+	if len(attached) == 0 {
+		return nil, errors.New("every process exited before it could be attached")
+	}
+	return attached, nil
 }
 
 // waitTreeExit blocks until ctx is done or the tracked map is empty (the
 // exit tracepoint removes processes as they die, fork adds new children).
+// Entries whose process is gone are dropped too: one that exited just
+// before it was added (attach races with exit) would otherwise keep the
+// session waiting forever.
 func waitTreeExit(ctx context.Context, tracked *ebpf.Map) {
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
@@ -467,9 +543,16 @@ func waitTreeExit(ctx context.Context, tracked *ebpf.Map) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			var k uint32
-			var v uint8
-			if !tracked.Iterate().Next(&k, &v) {
+			pids := trackedPIDs(tracked)
+			live := 0
+			for _, p := range pids {
+				if procAlive(p) {
+					live++
+				} else {
+					_ = tracked.Delete(uint32(p))
+				}
+			}
+			if live == 0 {
 				time.Sleep(200 * time.Millisecond) // drain in-flight events
 				return
 			}
@@ -554,18 +637,26 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 		cmd.Stderr = os.Stderr
 	}
 	attr := &syscall.SysProcAttr{}
+	var cred *syscall.Credential
 	if u := opts.targetUser(); u != nil {
-		cred, err := userCredential(u)
-		if err != nil {
+		var err error
+		if cred, err = userCredential(u); err != nil {
 			return 0, err
 		}
-		attr.Credential, cmd.Env = cred, userEnv(u)
+		cmd.Env = userEnv(u)
+		if !opts.Asks() { // in ask mode, the helper drops privileges itself
+			attr.Credential = cred
+		}
 	}
 	freezePath := ""
 	switch {
 	case deny != nil:
-		attr.UseCgroupFD, attr.CgroupFD = true, deny.FD()
-		freezePath = deny.path
+		home, err := deny.home()
+		if err != nil {
+			return 0, err
+		}
+		attr.UseCgroupFD, attr.CgroupFD = true, home.FD()
+		freezePath = home.path
 	case opts.FreezeOnAsk && opts.Asks():
 		pc, err := newPlainCgroup()
 		if err != nil {
@@ -604,7 +695,7 @@ func runCommand(ctx context.Context, opts Options, tracked *ebpf.Map, cfg askCon
 	var finishAsk func() (int, bool, error)
 	if opts.Asks() {
 		var err error
-		if finishAsk, err = askCommand(cmd, opts.Command, cfg.net, cfg.opens, cfg.execs); err != nil {
+		if finishAsk, err = askCommand(cmd, opts.Command, cred, cfg.net, cfg.opens, cfg.execs); err != nil {
 			return 0, fmt.Errorf("ask mode: %w", err)
 		}
 	}

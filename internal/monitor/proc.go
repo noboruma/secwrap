@@ -86,6 +86,38 @@ func FindByName(name string) []int {
 	return out
 }
 
+// procAlive reports whether pid is a live process: not gone, and not a
+// zombie unless other threads of it still run (its leader thread can exit
+// first, with pthread_exit).
+func procAlive(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return false
+	}
+	return statusAlive(string(data))
+}
+
+// statusAlive is procAlive on the contents of a /proc/PID/status file.
+func statusAlive(status string) bool {
+	state, threads := "", 0
+	for _, line := range strings.Split(status, "\n") {
+		if v, ok := strings.CutPrefix(line, "State:"); ok {
+			state = strings.TrimSpace(v)
+		} else if v, ok := strings.CutPrefix(line, "Threads:"); ok {
+			threads, _ = strconv.Atoi(strings.TrimSpace(v))
+		}
+	}
+	switch {
+	case state == "":
+		return false
+	case strings.HasPrefix(state, "Z"):
+		return threads > 1
+	case strings.HasPrefix(state, "X"):
+		return false
+	}
+	return true
+}
+
 // CheckAlive returns an error if any pid does not exist.
 func CheckAlive(pids []int) error {
 	var errs []error

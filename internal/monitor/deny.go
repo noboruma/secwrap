@@ -3,7 +3,6 @@
 package monitor
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -87,21 +86,40 @@ func probeDenyHelpers(spec *ebpf.CollectionSpec) error {
 	return set("have_comm_helper", asm.FnGetCurrentComm)
 }
 
-// denyCgroup is a dedicated cgroup v2 with the deny programs attached.
-// Every process placed in it loses all IPv4/IPv6 network access.
+// denyCgroup holds the deny programs and the cgroups they are attached to.
+// Every process placed in one of those cgroups loses all IPv4/IPv6 network
+// access (except what allow lets through).
+//
+// A process is never moved out of the cgroup it is in: it goes into a
+// child "secwrap-deny-<pid>" of that cgroup, created on first use, so the
+// limits and accounting of its container or systemd unit keep applying
+// (cgroup v2 limits are hierarchical). The launched command gets a child
+// of secwrap's own cgroup. Where a child cannot be created or used, one at
+// the cgroup root is the fallback.
 type denyCgroup struct {
 	objs   denyObjects
-	path   string
-	dir    *os.File
-	links  []link.Link
-	origin map[int]string // attach mode: pid -> cgroup dir to restore
+	name   string              // directory name under each parent cgroup
+	dirs   map[string]*denyDir // by the cgroup it serves (fallbacks share the root one)
+	origin map[int]string      // attached pid -> cgroup to move it back to
+}
+
+// denyDir is one cgroup with the deny programs attached.
+type denyDir struct {
+	path    string
+	restore string // where processes not in origin go back on Close
+	dir     *os.File
+	links   []link.Link
 }
 
 func setupDeny(spec *ebpf.CollectionSpec, events *ebpf.Map) (*denyCgroup, error) {
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
 		return nil, fmt.Errorf("deny mode needs cgroup v2 mounted at %s", cgroupRoot)
 	}
-	d := &denyCgroup{origin: map[int]string{}}
+	d := &denyCgroup{
+		name:   fmt.Sprintf("secwrap-deny-%d", os.Getpid()),
+		dirs:   map[string]*denyDir{},
+		origin: map[int]string{},
+	}
 	opts := &ebpf.CollectionOptions{MapReplacements: map[string]*ebpf.Map{"events": events}}
 	if err := spec.LoadAndAssign(&d.objs, opts); err != nil {
 		var ve *ebpf.VerifierError
@@ -110,13 +128,42 @@ func setupDeny(spec *ebpf.CollectionSpec, events *ebpf.Map) (*denyCgroup, error)
 		}
 		return nil, fmt.Errorf("load deny programs: %w", err)
 	}
+	return d, nil
+}
 
-	d.path = filepath.Join(cgroupRoot, fmt.Sprintf("secwrap-deny-%d", os.Getpid()))
-	if err := os.Mkdir(d.path, 0o755); err != nil {
-		d.objs.Close()
+// dirFor returns the deny cgroup for processes currently in parent,
+// creating it as a child of parent (or, failing that, of the root).
+func (d *denyCgroup) dirFor(parent string) (*denyDir, error) {
+	if dd := d.dirs[parent]; dd != nil {
+		return dd, nil
+	}
+	dd, err := d.create(parent)
+	if err != nil && parent != cgroupRoot {
+		// e.g. a threaded cgroup, or one we may not write to.
+		if root, rerr := d.dirFor(cgroupRoot); rerr == nil {
+			d.dirs[parent] = root
+			return root, nil
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	d.dirs[parent] = dd
+	return dd, nil
+}
+
+func (d *denyCgroup) create(parent string) (*denyDir, error) {
+	dd := &denyDir{path: filepath.Join(parent, d.name), restore: parent}
+	if parent == cgroupRoot {
+		// Shared fallback: the launched command's processes go back to
+		// secwrap's cgroup (attached ones have their own origin).
+		if own, err := cgroupOf(os.Getpid()); err == nil {
+			dd.restore = own
+		}
+	}
+	if err := os.Mkdir(dd.path, 0o755); err != nil {
 		return nil, fmt.Errorf("create cgroup: %w", err)
 	}
-
 	attachments := []struct {
 		typ  ebpf.AttachType
 		prog *ebpf.Program
@@ -129,38 +176,84 @@ func setupDeny(spec *ebpf.CollectionSpec, events *ebpf.Map) (*denyCgroup, error)
 		{ebpf.AttachCGroupInetIngress, d.objs.DenyIngress},
 	}
 	for _, a := range attachments {
-		l, err := link.AttachCgroup(link.CgroupOptions{Path: d.path, Attach: a.typ, Program: a.prog})
+		l, err := link.AttachCgroup(link.CgroupOptions{Path: dd.path, Attach: a.typ, Program: a.prog})
 		if err != nil {
-			d.Close()
+			dd.close(nil)
 			return nil, fmt.Errorf("attach deny program (%s): %w", a.typ, err)
 		}
-		d.links = append(d.links, l)
+		dd.links = append(dd.links, l)
 	}
-
-	dir, err := os.Open(d.path)
+	dir, err := os.Open(dd.path)
 	if err != nil {
-		d.Close()
+		dd.close(nil)
 		return nil, err
 	}
-	d.dir = dir
-	return d, nil
+	dd.dir = dir
+	return dd, nil
+}
+
+// home is the deny cgroup for the launched command: a child of secwrap's
+// own cgroup.
+func (d *denyCgroup) home() (*denyDir, error) {
+	own, err := cgroupOf(os.Getpid())
+	if err != nil {
+		own = cgroupRoot
+	}
+	return d.dirFor(own)
 }
 
 // FD is the cgroup directory fd, for spawning a child directly inside it.
-func (d *denyCgroup) FD() int { return int(d.dir.Fd()) }
+func (dd *denyDir) FD() int { return int(dd.dir.Fd()) }
 
-// addPID moves a running process (all its threads) into the deny cgroup and
-// remembers where it came from. Its future children inherit the cgroup.
+// addPID moves a running process (all its threads) into the deny cgroup
+// under its current cgroup and remembers where it came from. Its future
+// children inherit the cgroup.
 func (d *denyCgroup) addPID(pid int) error {
 	orig, err := cgroupOf(pid)
 	if err != nil {
 		return err
 	}
-	if err := writeProcs(d.path, pid); err != nil {
+	if d.isOurs(orig) {
+		return nil // already in (e.g. a child that inherited it meanwhile)
+	}
+	dd, err := d.dirFor(orig)
+	if err != nil {
+		return err
+	}
+	err = writeProcs(dd.path, pid)
+	if err != nil && orig != cgroupRoot && dd != d.dirs[cgroupRoot] {
+		if root, rerr := d.dirFor(cgroupRoot); rerr == nil && writeProcs(root.path, pid) == nil {
+			err = nil
+		}
+	}
+	if err != nil {
 		return fmt.Errorf("move pid %d into deny cgroup: %w", pid, err)
 	}
 	d.origin[pid] = orig
 	return nil
+}
+
+// isOurs reports whether path is one of the deny cgroups.
+func (d *denyCgroup) isOurs(path string) bool {
+	for _, dd := range d.dirs {
+		if dd.path == path {
+			return true
+		}
+	}
+	return false
+}
+
+// unique lists each deny cgroup once (fallbacks share the root one).
+func (d *denyCgroup) unique() []*denyDir {
+	seen := map[*denyDir]bool{}
+	var out []*denyDir
+	for _, dd := range d.dirs {
+		if !seen[dd] {
+			seen[dd] = true
+			out = append(out, dd)
+		}
+	}
+	return out
 }
 
 // allow lets the cgroup reach addr (port 0 = any port): connects, UDP sends
@@ -198,9 +291,11 @@ func peerKey(addr netip.Addr, port uint16) allowKey {
 	return k
 }
 
-// kill sends SIGKILL to every process still in the cgroup (cgroup.kill).
+// kill sends SIGKILL to every process still in the deny cgroups (cgroup.kill).
 func (d *denyCgroup) kill() {
-	_ = os.WriteFile(filepath.Join(d.path, "cgroup.kill"), []byte("1"), 0)
+	for _, dd := range d.unique() {
+		_ = os.WriteFile(filepath.Join(dd.path, "cgroup.kill"), []byte("1"), 0)
+	}
 }
 
 // dropped returns how many packets the skb programs dropped (egress, ingress).
@@ -219,61 +314,68 @@ func (d *denyCgroup) dropped() (egress, ingress uint64) {
 	return sum(0), sum(1)
 }
 
-// Close moves any processes still in the deny cgroup back to where they came
-// from (or to our own cgroup), detaches the programs and removes the cgroup.
-// Once this returns, those processes have normal network access again.
+// Close moves any processes still in the deny cgroups back to where they
+// came from, detaches the programs and removes the cgroups. Once this
+// returns, those processes have normal network access again.
 func (d *denyCgroup) Close() {
-	if d.path != "" {
-		fallback := ""
-		for _, o := range d.origin {
-			fallback = o
-			break
-		}
-		if fallback == "" {
-			fallback, _ = cgroupOf(os.Getpid())
-		}
-		for _, pid := range readProcs(d.path) {
-			dst := d.origin[pid]
-			if dst == "" {
-				dst = fallback
-			}
-			if dst != "" {
-				_ = writeProcs(dst, pid)
-			}
-		}
-	}
-	for _, l := range d.links {
-		l.Close()
+	for _, dd := range d.unique() {
+		dd.close(d.origin)
 	}
 	d.objs.Close()
-	if d.dir != nil {
-		d.dir.Close()
-	}
-	if d.path != "" {
-		// rmdir fails with EBUSY while exiting tasks are still accounted.
-		for i := 0; i < 20; i++ {
-			if err := os.Remove(d.path); err == nil || os.IsNotExist(err) {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
+}
+
+func (dd *denyDir) close(origin map[int]string) {
+	for _, pid := range readProcs(dd.path) {
+		dst := origin[pid]
+		if dst == "" {
+			dst = dd.restore
 		}
+		if writeProcs(dst, pid) != nil && dst != dd.restore {
+			_ = writeProcs(dd.restore, pid) // origin gone meanwhile
+		}
+	}
+	for _, l := range dd.links {
+		l.Close()
+	}
+	if dd.dir != nil {
+		dd.dir.Close()
+	}
+	// rmdir fails with EBUSY while exiting tasks are still accounted.
+	for i := 0; i < 20; i++ {
+		if err := os.Remove(dd.path); err == nil || os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
 // cgroupOf returns the absolute cgroup v2 directory of pid.
 func cgroupOf(pid int) (string, error) {
-	f, err := os.Open(fmt.Sprintf("/proc/%d/cgroup", pid))
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if rest, ok := strings.CutPrefix(sc.Text(), "0::"); ok {
+	path, err := parseCgroup(string(data))
+	if err != nil {
+		return "", fmt.Errorf("pid %d: %w", pid, err)
+	}
+	return path, nil
+}
+
+// parseCgroup returns the cgroup v2 directory in the contents of a
+// /proc/PID/cgroup file.
+func parseCgroup(data string) (string, error) {
+	for _, line := range strings.Split(data, "\n") {
+		if rest, ok := strings.CutPrefix(line, "0::"); ok {
+			// Relative to our cgroup namespace: "/.." means outside it.
+			rest = strings.TrimSuffix(rest, " (deleted)")
+			if rest == "/.." || strings.HasPrefix(rest, "/../") {
+				return "", fmt.Errorf("cgroup %s is outside secwrap's cgroup namespace", rest)
+			}
 			return filepath.Join(cgroupRoot, rest), nil
 		}
 	}
-	return "", fmt.Errorf("pid %d: no cgroup v2 membership", pid)
+	return "", errors.New("no cgroup v2 membership")
 }
 
 func writeProcs(dir string, pid int) error {

@@ -1,6 +1,6 @@
 //go:build ignore
 
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 // secwrap's eBPF object. The monitors are built as one object because they
 // share maps: the tracked process tree (all), and the file and folder rules
 // (filemon and execmon).
@@ -13,7 +13,7 @@
 
 /* Processes only: a new thread shares its parent's tgid, which is already
  * tracked. (Adding thread ids would leak entries: exit only removes
- * process leaders, and waitTreeExit waits for the map to empty.) */
+ * whole processes, and waitTreeExit waits for the map to empty.) */
 SEC("tp_btf/sched_process_fork")
 int BPF_PROG(handle_fork, struct task_struct *parent_task, struct task_struct *child_task)
 {
@@ -27,13 +27,18 @@ int BPF_PROG(handle_fork, struct task_struct *parent_task, struct task_struct *c
 }
 
 /* BTF tracepoints (fork above, exit here) need no tracefs, which is
- * usually not mounted in containers. */
+ * usually not mounted in containers.
+ *
+ * A process is done when its last thread exits, not its leader: the leader
+ * can pthread_exit while the other threads run on. do_exit decrements
+ * signal->live before this tracepoint fires, so it reads 0 exactly for the
+ * last thread of the group. */
 SEC("tp_btf/sched_process_exit")
 int BPF_PROG(handle_exit, struct task_struct *task)
 {
+	if (BPF_CORE_READ(task, signal, live.counter) != 0)
+		return 0; /* other threads of the process still run */
 	u32 tgid = task->tgid;
-	if ((u32)task->pid != tgid)
-		return 0; /* a thread, not the process leader */
 	bpf_map_delete_elem(&tracked, &tgid);
 	return 0;
 }
@@ -42,4 +47,4 @@ int BPF_PROG(handle_exit, struct task_struct *task)
 #include "filemon.bpf.c"
 #include "execmon.bpf.c"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") = "Dual BSD/GPL";

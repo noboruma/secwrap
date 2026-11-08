@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 // Shared by netmon, filemon and execmon: the tracked process tree and the
 // path rules that file and exec enforcement both use.
 

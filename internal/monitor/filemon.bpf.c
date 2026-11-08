@@ -1,6 +1,6 @@
 //go:build ignore
 
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 // File access (BPF LSM, needs "bpf" in /sys/kernel/security/lsm).
 // Every open by a traced task is reported with its full path. An open is
 // "in scope" when it writes/creates, or reads a sensitive path. With

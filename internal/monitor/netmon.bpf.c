@@ -1,6 +1,6 @@
 //go:build ignore
 
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
 // Network activity: TCP connect/accept and UDP sends by the tracked process
 // tree (or everything when trace_all is set), and deny mode on its cgroup.
 
