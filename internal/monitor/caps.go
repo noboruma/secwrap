@@ -140,7 +140,7 @@ func (c Caps) Check(o *Options) error {
 		modes Modes
 	}{
 		{o.Net, "--net", o.NetAction, c.Net()},
-		{o.Files, "--filesystem", o.FilesAction, c.Files()},
+		{o.Files, "--fs", o.FilesAction, c.Files()},
 		{o.Exec, "--exec", o.ExecAction, c.Files()},
 	} {
 		switch {

@@ -52,7 +52,7 @@ type FileEvent struct {
 	TID       uint32    `json:"tid"`
 	UID       uint32    `json:"uid"`
 	Comm      string    `json:"comm"`
-	Kind      string    `json:"kind"` // open (--filesystem) | exec (--exec)
+	Kind      string    `json:"kind"` // open (--fs) | exec (--exec)
 	Path      string    `json:"path"`
 	Write     bool      `json:"write,omitempty"`
 	Created   bool      `json:"created,omitempty"`
@@ -79,7 +79,7 @@ type FileAccess struct {
 }
 
 // fileObjects are the maps shared by the LSM programs (file_open for
-// --filesystem/--sbom, bprm_creds_for_exec for --exec).
+// --fs/--sbom, bprm_creds_for_exec for --exec).
 type fileObjects struct {
 	FileEvents  *ebpf.Map `ebpf:"file_events"`
 	FileRules   *ebpf.Map `ebpf:"file_rules"`
@@ -246,11 +246,11 @@ func bpfInLSMList() bool {
 
 // lsmConfig says which LSM programs to attach and what they enforce.
 type lsmConfig struct {
-	opens        bool // file_open: --filesystem, --sbom
-	logAll       bool // report every open (--filesystem), not only execs (--sbom)
-	enforceFiles bool // --filesystem with --deny/--ask
+	opens        bool // file_open: --fs, --sbom
+	logAll       bool // report every open (--fs), not only execs (--sbom)
+	enforceFiles bool // --fs in deny/ask mode
 	exec         bool // bprm_creds_for_exec: --exec
-	enforceExec  bool // --exec with --deny/--ask
+	enforceExec  bool // --exec in deny/ask mode
 }
 
 // setupLSM loads the shared maps, then each LSM program on its own, so a
@@ -258,10 +258,10 @@ type lsmConfig struct {
 func setupLSM(spec *ebpf.CollectionSpec, tracked *ebpf.Map, scope *fileScope, c lsmConfig, cleanup *closers) (*fileObjects, error) {
 	if !lsmArchSupported() {
 		m, _ := unameMachine()
-		return nil, fmt.Errorf("--filesystem, --exec and --sbom need BPF LSM programs, which %s kernels can't run (no BPF trampolines); only --net works here", m)
+		return nil, fmt.Errorf("--fs, --exec and --sbom need BPF LSM programs, which %s kernels can't run (no BPF trampolines); only --net works here", m)
 	}
 	if !bpfInLSMList() {
-		return nil, errors.New(`--filesystem, --exec and --sbom need the BPF LSM: "bpf" is not in /sys/kernel/security/lsm (add lsm=...,bpf to the kernel command line)`)
+		return nil, errors.New(`--fs, --exec and --sbom need the BPF LSM: "bpf" is not in /sys/kernel/security/lsm (add lsm=...,bpf to the kernel command line)`)
 	}
 	var (
 		count uint32

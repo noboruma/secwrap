@@ -5,7 +5,7 @@
 
 #include "common.bpf.h"
 
-const volatile u8 exec_enforce = 0; /* --exec with --deny/--ask */
+const volatile u8 exec_enforce = 0; /* --exec in deny/ask mode */
 
 /* --exec: every program executed, once per execve (bprm->file is the file
  * asked for; a script's interpreter is not checked again). With

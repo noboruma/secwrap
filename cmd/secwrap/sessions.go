@@ -1,7 +1,7 @@
 package main
 
 // Sessions: every monitoring session registers itself in a folder, and its
-// questions (--ask) are answered through files there, so another secwrap
+// questions (ask mode) are answered through files there, so another secwrap
 // (session attach, the --web page) can answer them without a connection to it:
 //
 //	/var/lib/secwrap/sessions/<id>/   root:invoker 0750

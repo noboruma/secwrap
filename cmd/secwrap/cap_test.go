@@ -39,8 +39,8 @@ func TestCapsCheck(t *testing.T) {
 	}
 	bad := monitor.Options{Net: true, Files: true, FilesAction: monitor.ActionDeny}
 	err := c.Check(&bad)
-	if err == nil || !strings.Contains(err.Error(), "--filesystem is not available") || !strings.Contains(err.Error(), `"bpf" not in`) {
-		t.Errorf("--filesystem deny without the LSM: got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "--fs is not available") || !strings.Contains(err.Error(), `"bpf" not in`) {
+		t.Errorf("--fs deny without the LSM: got %v", err)
 	}
 	t.Log(err)
 	noCgroup := monitor.Caps{BTF: true, Kprobes: true, SeccompNotif: true}
