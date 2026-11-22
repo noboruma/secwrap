@@ -244,6 +244,25 @@ with one:
 
 Run `secwrap --help` to see all options.
 
+## For coding agents (MCP)
+
+`secwrap mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin/stdout, so Claude Code
+or any other MCP client can read the sessions and their logs. It needs no root. For Claude Code:
+
+```sh
+claude mcp add secwrap -- secwrap mcp
+```
+
+| Tool | What it returns |
+| --- | --- |
+| `list_sessions` | every session, alive and dead: command, user, what is watched, ask mode, questions waiting |
+| `get_session` | a session's record, its JSON report and its summary |
+| `query_events` | a session's events, filtered by kind, process, path or address, blocked, writes and sensitive reads, time; paged |
+| `list_questions` | a session's questions and how each was answered |
+
+It is read-only: it can't answer questions, or hide or delete sessions, so an agent running under `secwrap` can't
+approve its own accesses. An alive session writes its events in 64 KiB batches, so the newest may not show yet.
+
 ## Cleaning up
 
 Every session keeps its events, report, summary and SBOMs in a folder under `~/.local/state/secwrap` (`--history DIR`

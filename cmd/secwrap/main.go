@@ -36,7 +36,7 @@ func main() {
 		os.Args = append(os.Args[:1], rest...)
 	}
 	cmds := map[string]func([]string) error{
-		"attach": cmdAttach, "shell": cmdShell, "sessions": cmdSession, "vacuum": cmdVacuum, "cap": cmdCap,
+		"attach": cmdAttach, "shell": cmdShell, "sessions": cmdSession, "vacuum": cmdVacuum, "cap": cmdCap, "mcp": cmdMCP,
 	}
 	name := ""
 	if len(os.Args) > 1 {
@@ -74,6 +74,7 @@ const usageCommands = `secwrap: run a command or a shell under eBPF watch: recor
   secwrap sessions                              sessions alive and dead in a terminal UI: attach, delete
   secwrap vacuum  [--older-than 30d]            delete dead sessions' records and history older than 30 days
   secwrap cap                                   what this kernel supports: network, filesystem, exec, sbom
+  secwrap mcp                                   serve sessions and their logs to an MCP client (read-only, stdio)
   secwrap sessions list | attach [ID] | delete ID
                                                list; answer one's questions here (root); delete dead ones
 `
